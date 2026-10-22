@@ -1,45 +1,56 @@
 # X归档站
 
-> X Archive Station · 自托管 X/Twitter 媒体归档 + 多平台视频下载 + 本地时间线阅读
+一个以 gallery-dl 为下载引擎的自托管 X/Twitter 归档系统。下载服务与文件仓库作为基础，ScriptCat 和网站共用接口与任务队列。
 
-## 项目名
-
-本项目名为 **X归档站**（英文 X Archive Station）。核心是一套部署在自己 NAS/服务器上的「抓取 → 存储 → 阅读」闭环：自动抓取 X 博主的媒体与推文全文，再用一个 X 风格的时间线网页来浏览。
-
-## 目录结构
-
-```
-x订阅/
-├── README.md             ← 本文件（项目名 + 导航）
-├── 项目文档.md            ← 完整项目文档（架构 / 部署 / 全部变更 / 操作手册）
-├── MeTube/               ← 服务一：多平台视频下载器
-│   ├── compose.yaml      ← Docker Compose 编排（含代理）
-│   └── 部署教程.md        ← 部署与使用教程
-└── GalleryDL-X订阅/       ← 服务二：X 博主自动归档
-    ├── Dockerfile        ← 镜像定义（python + gallery-dl）
-    ├── compose.yaml      ← 编排（含随机调度）
-    ├── config.json       ← gallery-dl 配置（限速 + 推文元数据）
-    ├── run.sh            ← 下载执行脚本
-    ├── entrypoint.sh     ← 类人随机调度器
-    ├── targets.txt       ← 订阅清单（每日随机 1-2 次）
-    ├── targets-weekly.txt← 周更清单（每 6-8 天随机一次）
-    ├── cookies.txt       ← X 登录 cookies（敏感，勿外传）
-    └── Reader/           ← 服务三：X 风格本地阅读网站（纯 Python + 原生 JS，零依赖）
-        ├── backend.py    ← 后端（API + 媒体/头像缓存 + 管理接口）
-        ├── index.html    ← 前端（X 白底三栏时间线 + 管理设置面板）
-        └── compose.yaml  ← 编排（只读挂载数据 + 头像缓存卷 + config 管理）
+```text
+ScriptCat 小浮窗 ─┐
+                 ├─ 统一接口 / 任务队列 ─ gallery-dl ─ 媒体与帖子仓库
+网站管理与阅读 ──┘           ↑                         │
+                            └──────── 归档索引 ───────┘
 ```
 
-## 三个服务与访问地址
+## 第一轮功能
 
-| 服务 | 作用 | 访问 |
-|---|---|---|
-| MeTube | 手动下载 YouTube 等多平台视频 | http://10.0.0.10:8081 |
-| GalleryDL | 自动抓取 X 博主媒体 + 推文全文（无界面） | 无（CLI） |
-| X Reader | X 风格时间线浏览归档内容 | http://10.0.0.10:9090 |
+- 在 X 页面推送博主、下载单帖、添加订阅、打开对应本地归档。
+- 网站统一添加下载、查看队列、生成或撤销脚本连接凭据。
+- 复用已有时间线、图片视频阅读、收藏同步、博主编号和持久阅读索引。
+- 使用现有 gallery-dl 解析和下载，沿用原媒体目录与 SQLite 去重库。
+- 一个业务容器，配置、媒体和缓存分卷保存；无需 Redis 或独立数据库服务。
 
-## 快速上手
+## 开始使用
 
-- 完整说明见 `项目文档.md`（涵盖服务器连接、部署、维护、变更日志、风控结论）
-- 本目录是**独立工程工作区**，与服务器 `/vol1/1000/Docker/` 下对应目录一一同步：改文件后 scp 上传并重启容器即可
-- `cookies.txt` 为敏感凭据，请勿提交到公开仓库
+在 Docker 主机上进入 `GalleryDL-X订阅`，复制 `.env.example` 为 `.env`，设置 `LOGIN_PASSWORD` 后运行：
+
+```sh
+docker compose up -d --build
+```
+
+默认访问 `http://127.0.0.1:9090`。局域网地址、X 登录状态、ScriptCat 安装、代理与已有数据迁移见[安装与维护](docs/DEPLOYMENT.md)。脚本原文件为 [xarchive.user.js](GalleryDL-X订阅/integration/xarchive.user.js)。
+
+程序和文件仓库一起设计，升级镜像保留 `/config`、`/downloads` 和 `/cache`。请先用独立试验目录验证，现有服务不要同时写入试验去重库。原项目的 MeTube 与其他下载器不在本次改动范围。
+
+## 程序结构
+
+| 位置 | 职责 |
+| --- | --- |
+| `GalleryDL-X订阅/service.py` | 单容器启动与子进程管理 |
+| `GalleryDL-X订阅/scheduler.py` | 串行调度与 gallery-dl 调用 |
+| `GalleryDL-X订阅/shared/` | 任务、订阅持久化、统一提交和脚本认证 |
+| `GalleryDL-X订阅/Reader/` | 原网站、统一 API 和下载连接页 |
+| `GalleryDL-X订阅/integration/` | ScriptCat 脚本 |
+| `tests/` | 隔离测试、容器与真实下载引擎检查 |
+
+## 验证
+
+```sh
+python tests/run_gate0.py
+docker build -t xarchive:check ./GalleryDL-X订阅
+python tests/container_smoke.py
+docker run --rm -v "$PWD/tests:/checks:ro" --entrypoint python xarchive:check /checks/engine_smoke.py
+```
+
+测试使用临时合成数据。引擎检查实际运行 gallery-dl，从本地 HTTP 服务下载并验证 SQLite 去重；不使用真实 Cookie。GitHub Actions 执行相同的回归、构建和容器检查。
+
+真实 X 登录下载、ScriptCat 扩展在真实 X 页面的权限和交互需单独联调；本地模拟和引擎测试通过不代表这些已经完成。详细证据见[验证记录](docs/VALIDATION.md)。
+
+接口见 [API.md](docs/API.md)，设计见[项目重构规划](项目重构规划.md)。旧版调查文档作为历史参考，部署请以上述新文档为准。

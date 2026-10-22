@@ -1,0 +1,22 @@
+name: Tests and single-container smoke
+on:
+  push:
+    branches: [main, 'codex/**']
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python tests/run_gate0.py
+      - name: Build image
+        run: docker build -t xarchive:check './GalleryDL-X订阅'
+      - name: Start, authenticate, persist, stop, restart
+        run: python tests/container_smoke.py
+      - name: Real downloader fixture and archive deduplication
+        run: docker run --rm -v "$PWD/tests:/checks:ro" --entrypoint python xarchive:check /checks/engine_smoke.py
