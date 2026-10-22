@@ -2,14 +2,16 @@
 
 日期：2026-10-22。此记录区分实际完成和待验证项目。
 
+已通过运行：[GitHub Actions #2](https://github.com/aevyrian/x-subscription/actions/runs/39744769633)，对应实现提交 cb6fe4f。代码见[草稿 PR #1](https://github.com/aevyrian/x-subscription/pull/1)，未合并、未替换现有服务器。
+
 | 验证 | 结果与依据 |
 | --- | --- |
 | 原有回归 | 初始 46 项通过，作为复用功能基线 |
-| 扩展回归 | 统一接口、认证撤销、网站共享任务、并发去重、队列恢复、存储保留等纳入 `tests/run_gate0.py` |
+| 扩展回归 | 69 项通过；覆盖统一接口、认证撤销、网站共享任务、并发去重、队列恢复、存储保留 |
 | 真实下载引擎 | gallery-dl 1.32.17 从临时本地 HTTP 服务下载，逐字节核对文件；第二次运行 SQLite 去重且不重复请求 |
 | 网站浏览器检查 | ego(lite) 实际登录合成数据预览，打开下载连接页，表单提交单帖后显示持久化等待任务 |
 | 脚本浏览器模拟 | 实际执行 userscript 文件，使用模拟 GM API 发出 Bearer 请求；网站显示来源 ScriptCat 的任务 |
-| Docker 构建 / 生命周期 | 本机没有 Docker；通过 GitHub Actions 执行构建、登录、API、非 root、重启与持久化检查，结果以关联运行记录为准 |
+| Docker 构建 / 生命周期 | GitHub Actions 实际构建并通过容器登录、API、非 root、重启与持久化；容器内真实引擎下载与去重同样通过 |
 | 真实 X 下载 | 尚未执行，未读取真实 Cookie 或替换服务器配置 |
 | 真实 ScriptCat 扩展 | 尚未在真实 X 页面安装联调；模拟 GM API 不代表扩展权限和 X 页面行为已经验证 |
 

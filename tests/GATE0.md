@@ -14,7 +14,7 @@ refetch on incremental jobs; C11 whole-site authentication.
 
 Known legacy issues captured as passing tests:
 
-- DEC-019: editing frequency/window leaves an existing `.next_<id>` unchanged.
+- DEC-019 is fixed: editing frequency/window recomputes `.next_<id>`.
 - DEC-020: a running media job without a matching trigger becomes failed on restart.
 - Running comment jobs do not use media trigger recovery; queued comment jobs
   are not recovered into the media trigger queue.
