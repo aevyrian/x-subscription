@@ -1,0 +1,56 @@
+# X 归档站本地版本管理忽略规则
+# 目标：代码与文档进版本，凭据与数据与缓存不进版本
+
+# ---- 凭据与含真实凭据的配置文件（保留磁盘文件，仅移出版本） ----
+**/cookies.txt
+**/cookies/
+GalleryDL-X订阅/config.json
+GalleryDL-X订阅/Reader/compose.yaml
+MeTube/compose.yaml
+.env
+!.env.example
+
+# ---- 订阅状态与任务运行时文件 ----
+.jobs.json
+.trigger.json
+.ctrigger.json
+.batches.json
+.last_*
+.next_*
+.high_plan
+.high_plan_day
+.last_weekly
+
+# ---- 数据、数据库、日志 ----
+*.sqlite
+*.sqlite-journal
+*.db
+downloads/
+.joblogs/
+logs/
+comments_raw/
+.cache/
+
+# ---- 本地备份副本（保留磁盘，移出版本，避免与 Git 历史混淆） ----
+*.bak
+*.bak2
+*.pre-*
+.bak_*
+
+# ---- 构建缓存 ----
+__pycache__/
+*.pyc
+*.pyo
+
+# ---- 测试与比对临时产物 ----
+tests/.tmp/
+*.tmp
+
+# ---- 系统与同步工具产物 ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- 本地开发与浏览器验收环境（模拟数据、node 依赖、截图、构建中间件） ----
+local-dev/
+_chrome*/

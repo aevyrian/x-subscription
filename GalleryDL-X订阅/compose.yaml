@@ -1,0 +1,12 @@
+services:
+  gallerydl:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gallerydl
+    restart: unless-stopped
+    volumes:
+      - /vol1/1000/Docker/GalleryDL/config:/config
+      - ${GALLERYDL_DOWNLOAD_DIR:-/vol1/1000/Docker/GalleryDL/downloads}:/downloads
+    environment:
+      - TZ=Asia/Shanghai

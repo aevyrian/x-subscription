@@ -1,0 +1,26 @@
+{
+  "extractor": {
+    "base-directory": "/downloads",
+    "proxy": "http://USERNAME:PASSWORD@proxy.example.com:8080",
+    "archive": "/config/archive.sqlite",
+    "twitter": {
+      "cookies": "/config/cookies/cookies.txt",
+      "retweets": false,
+      "replies": true,
+      "quoted": true,
+      "videos": true,
+      "previews": false,
+      "cards": false,
+      "sleep-request": 2.0,
+      "limit": 1500,
+      "retries-api": 3,
+      "ratelimit": "wait:180",
+      "postprocessors": [
+        {
+          "name": "metadata",
+          "filename": "{author[name]}_{tweet_id}.json"
+        }
+      ]
+    }
+  }
+}
