@@ -7,66 +7,154 @@ import random
 import subprocess
 import time
 import datetime
+import threading
+import tempfile
+from shared.logging_utils import redact
+from contextlib import contextmanager
 
 GDL = os.environ.get("GDL_CONFIG", "/config")
 FREQ = {"daily": 1, "weekly": 7, "monthly": 30}
+JOB_KEEP = 200
+_storage_thread_lock = threading.RLock()
 
 
 def _p(name):
     return os.path.join(GDL, name)
 
 
-def load_subs():
-    f = _p("subscriptions.json")
-    if os.path.isfile(f):
+@contextmanager
+def _storage_lock(path):
+    lock_path = path + ".lock"
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    with _storage_thread_lock:
+        fh = open(lock_path, "a+")
         try:
-            return json.load(open(f, encoding="utf-8")).get("subs", [])
-        except Exception:
-            return []
-    return []
+            try:
+                import fcntl
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            except ImportError:
+                pass
+            yield
+        finally:
+            try:
+                import fcntl
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            except ImportError:
+                pass
+            fh.close()
+
+
+def _atomic_write_text(path, text):
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+
+
+def _atomic_write_json(path, value, indent=None):
+    _atomic_write_text(path, json.dumps(value, ensure_ascii=False, indent=indent))
+
+
+def _subscription_repository():
+    from shared.subscription_repository import LegacySubscriptionRepository
+    return LegacySubscriptionRepository(_p("subscriptions.json"))
+
+
+def load_subs():
+    return _subscription_repository().load()
+
+
+def _job_repository():
+    from shared.job_repository import LegacyJobRepository
+    return LegacyJobRepository(_p(".jobs.json"), keep=JOB_KEEP)
+
+
+def _load_jobs_unlocked():
+    return _job_repository().load_unlocked()
 
 
 def _load_jobs():
-    f = _p(".jobs.json")
-    if os.path.isfile(f):
-        try:
-            d = json.load(open(f, encoding="utf-8"))
-            return d.get("jobs", []) if isinstance(d, dict) else []
-        except Exception:
-            return []
-    return []
+    return _job_repository().load()
+
+
+def _save_jobs_unlocked(jobs):
+    _job_repository().save_unlocked(jobs)
 
 
 def _save_jobs(jobs):
-    jobs = jobs[-50:]
-    with open(_p(".jobs.json"), "w", encoding="utf-8") as f:
-        json.dump({"jobs": jobs}, f, ensure_ascii=False, indent=1)
+    _job_repository().save(jobs)
+
+
+def _append_job(job):
+    _job_repository().append(job)
 
 
 def _update_job(job_id, **kw):
-    jobs = _load_jobs()
-    for j in jobs:
-        if j.get("job_id") == job_id:
-            j.update(kw)
-            break
-    _save_jobs(jobs)
+    _job_repository().update(job_id, **kw)
 
 
 def _find_job(job_id):
     return next((j for j in _load_jobs() if j.get("job_id") == job_id), None)
 
 
+def recover_interrupted_jobs():
+    """在调度器启动时修复上次容器重启遗留的运行状态。
+
+    当前任务在 ``run_sub`` 返回前会保留在 .trigger.json；因此重启后可
+    安全地恢复为 queued，由 archive.sqlite 去重。没有触发器的运行中任务
+    无法判断参数是否仍有效，标为中断而非盲目重复执行。
+    """
+    trigger_ids = set()
+    for item in load_trigger():
+        jid = item.get("job")
+        if jid:
+            trigger_ids.add(jid)
+
+    jobs = _load_jobs()
+    now = int(time.time())
+    resumed = interrupted = 0
+    for job in jobs:
+        if job.get("status") != "running":
+            continue
+        if job.get("kind") == "download":
+            job.update(status="queued", started_ts=None, error="服务重启，等待恢复下载")
+            resumed += 1
+            continue
+        if job.get("job_id") in trigger_ids:
+            job.update(status="queued", started_ts=None, recovered_ts=now,
+                       error="服务重启后已恢复等待")
+            resumed += 1
+        else:
+            job.update(status="failed", finished_ts=now, exit_code=None,
+                       error="服务重启导致任务中断，未自动重试")
+            interrupted += 1
+    if resumed or interrupted:
+        _save_jobs(jobs)
+        print(f"[sched] recovered queued={resumed} interrupted={interrupted}", flush=True)
+
+
 def last_ts(s):
     f = f"{GDL}/.last_{s['id']}"
     if os.path.isfile(f):
         try:
-            return int(open(f).read().strip() or 0)
+            with open(f) as fh:
+                return int(fh.read().strip() or 0)
         except Exception:
             return None
     return None
 
 
 def compute_next(s, after=None):
+    if s.get("frequency") == "once":
+        return None
     days = FREQ.get(s.get("frequency"), int(s.get("custom_days", 7)))
     ws = int(s.get("window_start", 9))
     we = int(s.get("window_end", 20))
@@ -80,19 +168,58 @@ def compute_next(s, after=None):
 
 
 def classify_error(out, rc):
+    if rc == 0:
+        return ""
     if "AuthRequired" in out or "authenticated cookies needed" in out:
         return "Cookie 失效，需要重新上传 cookies"
     if " 429" in out or "429 " in out or "Rate limit" in out or "rate-limit" in out:
         return "X 请求限流，已退避；稍后自动重试"
     if "Permission denied" in out:
         return "文件权限错误"
-    if "NameResolution" in out or "Failed to establish" in out or "ProxyError" in out or "Connection aborted" in out or "Timeout" in out:
+    if _transient_network_error(out):
         return "网络/代理连接失败"
     if "FileNotFoundError" in out or "No such file or directory: 'gallery-dl'" in out:
         return "gallery-dl 未启动"
     if rc != 0:
         return f"gallery-dl 退出码 {rc}"
     return ""
+
+
+def _output_text(value):
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value or ""
+
+
+def _transient_network_error(out):
+    return any(marker in out for marker in (
+        "SSLError", "UNEXPECTED_EOF_WHILE_READING", "ProxyError",
+        "Connection aborted", "Failed to establish", "NameResolution",
+        "Timeout", "TIMEOUT", "timed out",
+    ))
+
+
+def run_gallery_dl(args, timeout=3600):
+    """Retry one clear network failure; return final output and complete log."""
+    attempts = []
+    for attempt in range(2):
+        try:
+            p = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+            out = _output_text(p.stdout) + _output_text(p.stderr)
+            rc = p.returncode
+        except FileNotFoundError:
+            out, rc = "FileNotFoundError: gallery-dl", 127
+        except subprocess.TimeoutExpired as e:
+            out = _output_text(e.stdout) + _output_text(e.stderr) + "\n[TIMEOUT]"
+            rc = 124
+        except Exception as e:
+            out, rc = f"ERROR: {e}", 1
+        attempts.append(out)
+        if rc in (0, 124) or attempt or not _transient_network_error(out):
+            break
+        print("[sched] transient network error; retrying once", flush=True)
+        time.sleep(3)
+    return out, rc, "\n[retry]\n".join(attempts)
 
 
 def is_fatal_error(err):
@@ -107,26 +234,28 @@ def run_sub(s, first, job_id=None, trigger="schedule"):
     if job_id is None:
         import uuid
         job_id = uuid.uuid4().hex[:12]
-        jobs = _load_jobs()
-        jobs.append({
+        _append_job({
             "job_id": job_id, "sub_id": s["id"], "user": s.get("user"),
             "status": "queued", "trigger": trigger,
             "ts_submit": int(time.time()), "started_ts": None,
             "finished_ts": None, "exit_code": None,
             "new_media": None, "new_json": None, "skipped": None, "error": None,
         })
-        _save_jobs(jobs)
     pp = [{"name": "metadata", "filename": "{author[name]}_{tweet_id}.json"}] \
         if s.get("save_metadata", True) else []
     over = {"extractor": {"twitter": {
         "videos": bool(s.get("save_videos", True)),
         "postprocessors": pp,
     }}}
-    with open("/tmp/gdl_over.json", "w", encoding="utf-8") as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", encoding="utf-8", delete=False) as f:
         json.dump(over, f)
-    args = ["gallery-dl", "-c", f"{GDL}/config.json", "-c", "/tmp/gdl_over.json"]
+        override_path = f.name
+    args = ["gallery-dl", "-c", f"{GDL}/config.json", "-c", override_path]
     r = int(s.get("first_range", 0))
-    if first and r > 0:
+    full_scan = bool((_find_job(job_id) or {}).get("full_scan"))
+    if full_scan:
+        args += ["-o", "skip=true"]
+    if first and r > 0 and not full_scan:
         args += ["--range", f"1-{r}"]
     args.append(s["url"])
     print(f"[sched] {time.strftime('%F %T')} run @{s.get('user')} "
@@ -134,31 +263,22 @@ def run_sub(s, first, job_id=None, trigger="schedule"):
     _update_job(job_id, status="running", started_ts=int(time.time()))
     log_dir = os.path.join(GDL, ".joblogs")
     os.makedirs(log_dir, exist_ok=True)
-    out, rc = "", -1
     try:
-        p = subprocess.run(args, capture_output=True, text=True, timeout=3600)
-        out = (p.stdout or "") + (p.stderr or "")
-        rc = p.returncode
-    except FileNotFoundError:
-        out = "FileNotFoundError: gallery-dl"
-        rc = 127
-    except subprocess.TimeoutExpired as e:
-        out = (e.stdout or "") + (e.stderr or "") + "\n[TIMEOUT] 任务超时(3600s)"
-        rc = 124
-    except Exception as e:
-        out = f"ERROR: {e}"
-        rc = 1
+        out, rc, full_log = run_gallery_dl(args)
+    finally:
+        os.unlink(override_path)
     try:
         with open(os.path.join(log_dir, f"job_{job_id}.log"), "w", encoding="utf-8") as f:
-            f.write(f"$ {' '.join(args)}\n\n{out}\n[exit={rc}]\n")
+            f.write(redact(f"$ {' '.join(args)}\n\n{full_log}\n[exit={rc}]\n"))
     except OSError as e:
         print(f"[sched] log write failed: {e}", flush=True)
     new_media = new_json = skipped = 0
-    for ln in out.splitlines():
+    for ln in full_log.splitlines():
         t = ln.strip()
-        if t.startswith("# /downloads/") or t.startswith("#/downloads/"):
+        root = os.environ.get("DATA_DIR", "/downloads").rstrip("/") + "/"
+        if t.startswith("# " + root) or t.startswith("#" + root):
             skipped += 1
-        elif t.startswith("/downloads/"):
+        elif t.startswith(root):
             if t.endswith(".json"):
                 new_json += 1
             else:
@@ -168,8 +288,8 @@ def run_sub(s, first, job_id=None, trigger="schedule"):
     _update_job(job_id, status=status, finished_ts=int(time.time()),
                 exit_code=rc, new_media=new_media, new_json=new_json,
                 skipped=skipped, error=err or None)
-    with open(f"{GDL}/.last_{s['id']}", "w") as f:
-        f.write(str(int(time.time())))
+    if status == "done" and not s.get("one_shot"):
+        _atomic_write_text(f"{GDL}/.last_{s['id']}", str(int(time.time())))
     print(f"[sched] @{s.get('user')} job={job_id} {status} "
           f"new_media={new_media} new_json={new_json} skipped={skipped} {err}", flush=True)
     return status, err
@@ -179,7 +299,8 @@ def load_trigger():
     f = f"{GDL}/.trigger.json"
     if os.path.isfile(f):
         try:
-            return json.load(open(f, encoding="utf-8"))
+            with open(f, encoding="utf-8") as fh:
+                return json.load(fh)
         except Exception:
             return []
     return []
@@ -197,10 +318,37 @@ def clear_trigger():
 def _write_trigger(lst):
     """写回剩余队列（逐任务消费后调用，崩溃重启只剩未执行项）。"""
     try:
-        with open(f"{GDL}/.trigger.json", "w", encoding="utf-8") as f:
-            json.dump(lst, f, ensure_ascii=False)
+        target = f"{GDL}/.trigger.json"
+        with _storage_lock(target):
+            _atomic_write_json(target, lst)
     except OSError as e:
         print(f"[sched] trigger write failed: {e}", flush=True)
+
+
+def _remove_trigger(job_id):
+    """只移除已处理任务，保留消费期间由 Reader 新增的触发项。"""
+    target = f"{GDL}/.trigger.json"
+    with _storage_lock(target):
+        current = load_trigger()
+        _atomic_write_json(target, [x for x in current if x.get("job") != job_id])
+
+
+def recover_orphaned_queued_jobs():
+    """补回因并发写入或容器重启而遗失触发项的普通下载任务。"""
+    trig = load_trigger()
+    known = {x.get("job") for x in trig}
+    added = 0
+    for job in _load_jobs():
+        jid = job.get("job_id")
+        if (job.get("status") == "queued" and job.get("kind") not in {"comments", "download"}
+                and jid and jid not in known):
+            trig.append({"id": job.get("sub_id"), "job": jid,
+                         "user": job.get("user"), "ts": job.get("ts_submit")})
+            known.add(jid)
+            added += 1
+    if added:
+        _write_trigger(trig)
+        print(f"[sched] recovered orphaned queued={added}", flush=True)
 
 
 def _load_batches():
@@ -237,13 +385,13 @@ def consume_triggers(subs):
         cur = _find_job(jid) if jid else None
         if not cur or cur.get("status") != "queued":
             remaining = [r for r in remaining if r.get("job") != jid]
-            _write_trigger(remaining)
+            _remove_trigger(jid)
             continue
         if halted or _batch_cancelled(job.get("batch")):
             _update_job(jid, status="failed", finished_ts=int(time.time()),
                         error=halt_reason if halted else "批量任务已停止")
             remaining = [r for r in remaining if r.get("job") != jid]
-            _write_trigger(remaining)
+            _remove_trigger(jid)
             continue
         s = by_id.get(job.get("id"))
         if s and s.get("enabled", True):
@@ -252,8 +400,7 @@ def consume_triggers(subs):
             if is_fatal_error(err):
                 halted, halt_reason = True, err
         remaining = [r for r in remaining if r.get("job") != jid]
-        _write_trigger(remaining)
-    clear_trigger()
+        _remove_trigger(jid)
 
 
 def mark_stale_trigger(jobs_list, subs):
@@ -274,7 +421,8 @@ def load_ctriggers():
     f = f"{GDL}/.ctrigger.json"
     if os.path.isfile(f):
         try:
-            return json.load(open(f, encoding="utf-8"))
+            with open(f, encoding="utf-8") as fh:
+                return json.load(fh)
         except Exception:
             return []
     return []
@@ -339,15 +487,16 @@ def run_comments(tid, user, job_id):
     os.makedirs(log_dir, exist_ok=True)
     try:
         with open(os.path.join(log_dir, f"job_{job_id}.log"), "w", encoding="utf-8") as f:
-            f.write(f"$ gallery-dl comments @{user}/{tid}\n\n{out}\n[exit={rc}]\n")
+            f.write(redact(f"$ gallery-dl comments @{user}/{tid}\n\n{out}\n[exit={rc}]\n"))
     except OSError as e:
         print(f"[sched] comment log write failed: {e}", flush=True)
     merged = {}
-    cdir = f"/downloads/twitter/{user}/comments"
+    cdir = os.path.join(os.environ.get("DATA_DIR", "/downloads"), "twitter", user, "comments")
     cfile = f"{cdir}/{tid}.json"
     try:
         if os.path.isfile(cfile):
-            old = json.load(open(cfile, encoding="utf-8"))
+            with open(cfile, encoding="utf-8") as fh:
+                old = json.load(fh)
             for c in old.get("comments", []):
                 if c.get("id") and c.get("content"):
                     merged[str(c["id"])] = c
@@ -371,10 +520,9 @@ def run_comments(tid, user, job_id):
     status = "failed" if err else ("ok" if comments else "empty")
     try:
         os.makedirs(cdir, exist_ok=True)
-        with open(cfile, "w", encoding="utf-8") as f:
-            json.dump({"tweet_id": str(tid), "user": user, "status": status,
-                       "updated_ts": int(time.time()), "error": err or None,
-                       "comments": comments}, f, ensure_ascii=False, indent=1)
+        _atomic_write_json(cfile, {"tweet_id": str(tid), "user": user, "status": status,
+                                  "updated_ts": int(time.time()), "error": err or None,
+                                  "comments": comments}, indent=1)
     except OSError as e:
         status, err = "failed", f"评论文件写入失败: {e}"
     _update_job(job_id, status=("failed" if status == "failed" else "done"),
@@ -385,11 +533,33 @@ def run_comments(tid, user, job_id):
           flush=True)
 
 
+def consume_downloads():
+    """Use the same serial executor and job repository for both entry points."""
+    for job in _load_jobs():
+        if job.get("kind") != "download" or job.get("status") != "queued":
+            continue
+        from shared.intake import target
+        try:
+            parsed = target(job.get("target_url"))
+            sub = {"id": job["job_id"], "user": parsed["user"], "url": parsed["url"],
+                   "first_range": 0 if parsed["tweet_id"] else job.get("first_range", 20),
+                   "save_videos": True, "save_metadata": True, "one_shot": True}
+            _, error = run_sub(sub, first=True, job_id=job["job_id"])
+            if is_fatal_error(error):
+                break
+        except Exception:
+            _update_job(job["job_id"], status="failed", finished_ts=int(time.time()),
+                        error="下载执行异常，请检查服务日志")
+
+
 def main():
     print("[sched] subscriptions scheduler started", flush=True)
+    recover_interrupted_jobs()
     while True:
         try:
             subs = load_subs()
+            consume_downloads()
+            recover_orphaned_queued_jobs()
             consume_triggers(subs)
             for cj in load_ctriggers():
                 jid, tid, user = cj.get("job"), cj.get("tid"), cj.get("user")
@@ -403,21 +573,22 @@ def main():
             for s in subs:
                 if not s.get("enabled", True):
                     continue
+                if s.get("frequency") == "once":
+                    continue
                 nf = f"{GDL}/.next_{s['id']}"
                 if not os.path.isfile(nf):
-                    with open(nf, "w") as f:
-                        f.write(str(compute_next(s)))
+                    _atomic_write_text(nf, str(compute_next(s)))
                 try:
-                    nxt = int(open(nf).read().strip() or 0)
+                    with open(nf) as fh:
+                        nxt = int(fh.read().strip() or 0)
                 except Exception:
                     nxt = 0
                 if time.time() >= nxt:
                     run_sub(s, first=(last_ts(s) is None))
-                    with open(nf, "w") as f:
-                        f.write(str(compute_next(s, after=time.time())))
+                    _atomic_write_text(nf, str(compute_next(s, after=time.time())))
         except Exception as e:
             print(f"[sched] loop error: {e}", flush=True)
-        time.sleep(60)
+        time.sleep(3)
 
 
 if __name__ == "__main__":

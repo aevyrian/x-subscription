@@ -54,3 +54,6 @@ desktop.ini
 # ---- 本地开发与浏览器验收环境（模拟数据、node 依赖、截图、构建中间件） ----
 local-dev/
 _chrome*/
+
+项目文档.md
+对话归档.md

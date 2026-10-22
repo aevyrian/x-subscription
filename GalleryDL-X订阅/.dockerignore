@@ -1,0 +1,14 @@
+*
+!Dockerfile
+!scheduler.py
+!service.py
+!config.example.json
+!shared/
+!shared/*.py
+!Reader/
+!Reader/backend.py
+!Reader/index.html
+!Reader/api_v1.py
+!Reader/connect.html
+!integration/
+!integration/xarchive.user.js

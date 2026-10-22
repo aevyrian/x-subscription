@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>下载与连接 · X归档站</title>
+<style>
+:root{font-family:system-ui,"Microsoft YaHei",sans-serif;color:#182531;background:#f5f7fa;font-size:15px}*{box-sizing:border-box}body{margin:0}main{max-width:1050px;margin:36px auto;padding:0 22px}header{display:flex;align-items:center;justify-content:space-between;margin-bottom:26px}h1{font-size:26px;margin:5px 0}h2{font-size:18px;margin:0 0 16px}p{line-height:1.65;color:#627487}a{color:#1477bb;text-decoration:none}.grid{display:grid;grid-template-columns:1.15fr 1fr;gap:20px}.card{background:white;border:1px solid #e1e7ee;border-radius:18px;padding:24px;margin-bottom:20px}label{display:block;margin:14px 0 7px;color:#44586b}input,select,button{font:inherit;border-radius:9px;min-height:42px}input,select{width:100%;border:1px solid #ced8e1;background:#fff;padding:9px 12px}button{border:0;padding:9px 16px;background:#1689d2;color:white;cursor:pointer;font-weight:600}button.secondary{background:#edf3f8;color:#354b60}button:disabled{opacity:.6;cursor:wait}.row{display:flex;gap:12px;align-items:center}.row>*{flex:1}.notice{min-height:26px;margin:12px 0;color:#42617b;overflow-wrap:anywhere}.task{padding:15px 0;border-top:1px solid #ecf0f4;display:flex;gap:16px;justify-content:space-between}.task small{display:block;color:#718294;margin-top:5px}.badge{border-radius:99px;background:#edf5fc;color:#226a9c;padding:4px 10px;font-size:13px;white-space:nowrap;align-self:start}.muted{color:#718294;font-size:13px}.client{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid #ecf0f4}#tokenBox[hidden]{display:none}#tokenBox{background:#f2f8fd;padding:14px;border-radius:10px;margin-top:14px}#token{font-family:monospace}#error{color:#b33a35;min-height:22px}@media(max-width:740px){main{margin:22px auto}.grid{grid-template-columns:1fr}header{align-items:start;gap:12px}.card{padding:20px}}
+</style>
+<main>
+<header><div><span class="muted">X ARCHIVE STATION</span><h1>下载与连接</h1><p>从 X 推送，在这里统一下载和整理。</p></div><a href="/">返回归档 →</a></header>
+<div id="error" role="alert"></div>
+<div class="grid">
+<section class="card"><h2>添加下载</h2><form id="submitForm">
+<label for="url">博主或帖子链接</label><input id="url" required placeholder="https://x.com/username/status/…" autocomplete="off">
+<div class="row"><div><label for="mode">操作</label><select id="mode"><option value="download">下载一次</option><option value="subscribe">订阅博主，每周更新</option></select></div><div><label for="limit">博主首次范围</label><input id="limit" type="number" min="1" max="1500" value="20" required></div></div>
+<p class="muted">单帖按原帖下载；博主默认最近 20 条。已下载媒体由下载服务去重。</p><button id="submit">加入队列</button><div id="submitState" class="notice" role="status"></div>
+</form></section>
+<section class="card"><h2>连接 ScriptCat</h2><p>安装脚本后，在 X 页面打开小浮窗，填写本站地址与连接凭据。X 登录状态继续由下载服务管理。</p>
+<p><a href="/integration/xarchive.user.js">安装 / 下载 ScriptCat 脚本 ↗</a></p>
+<label for="clientName">连接名称</label><input id="clientName" maxlength="60" value="我的 ScriptCat">
+<p><button id="issue" class="secondary">生成连接凭据</button></p>
+<div id="tokenBox" hidden><strong>仅显示这一次</strong><p class="muted">复制到脚本设置，不要发送到聊天或放入网址。</p><input id="token" readonly type="password" aria-label="新连接凭据"><p><button id="copy" class="secondary">复制凭据</button> <button id="reveal" class="secondary">显示</button></p></div>
+<div id="clients"></div>
+</section>
+</div>
+<section class="card"><div class="row"><h2>下载任务</h2><span class="muted" style="text-align:right">来自网站与 ScriptCat 的同一队列</span></div><div id="tasks" aria-live="polite">正在读取…</div></section>
+</main>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+async function api(path,method='GET',body){const r=await fetch(path,{method,headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined});if(r.status===401){location.assign('/login');throw Error('请先登录')}const data=await r.json();if(!r.ok)throw Error(data.error||'请求失败');return data}
+const names={queued:'等待中',running:'下载中',done:'已完成',failed:'失败',cancelled:'已取消'};
+function text(tag,value,cls){const e=document.createElement(tag);e.textContent=value;if(cls)e.className=cls;return e}
+async function refresh(){try{const data=await api('/api/v1/tasks');$('tasks').replaceChildren();if(!data.tasks.length)$('tasks').append(text('p','还没有任务。在网站添加链接，或从 X 推送过来。','muted'));for(const task of data.tasks.slice(0,60)){const row=text('div','','task'),info=text('div','@'+(task.user||'未知博主'));info.append(text('small',task.tweet_id?'帖子 '+task.tweet_id:'博主归档'));info.append(text('small',(task.trigger==='scriptcat'?'ScriptCat':'网站 / 订阅')+' · '+(task.ts_submit?new Date(task.ts_submit*1000).toLocaleString():'')));if(task.status==='done'){info.append(text('small','本次新增媒体 '+(task.new_media||0)+' · 帖子信息 '+(task.new_json||0)));const a=text('a','打开归档 →');a.href=task.archive_path;info.append(a)}if(task.error)info.append(text('small',task.error));row.append(info,text('span',names[task.status]||task.status,'badge'));$('tasks').append(row)}$('error').textContent=''}catch(e){$('error').textContent=e.message}}
+$('submitForm').onsubmit=async e=>{e.preventDefault();$('submit').disabled=true;try{const r=await api('/api/v1/tasks','POST',{url:$('url').value,mode:$('mode').value,limit:Number($('limit').value)});$('submitState').textContent=r.duplicate?'已经在队列或订阅列表中。':'已接收，等待下载服务执行。';await refresh()}catch(e){$('submitState').textContent=e.message}finally{$('submit').disabled=false}};
+async function clients(){const r=await api('/api/admin/clients');$('clients').replaceChildren();for(const client of r.clients){const row=text('div','','client'),button=text('button','撤销','secondary');button.onclick=async()=>{await api('/api/admin/clients/'+client.id,'DELETE');await clients()};row.append(text('span',client.name),button);$('clients').append(row)}}
+$('issue').onclick=async()=>{try{const r=await api('/api/admin/clients','POST',{name:$('clientName').value});$('token').value=r.token;$('tokenBox').hidden=false;await clients()}catch(e){$('error').textContent=e.message}};
+$('copy').onclick=async()=>{try{await navigator.clipboard.writeText($('token').value);$('copy').textContent='已复制'}catch{$('token').type='text';$('token').select();$('copy').textContent='请手动复制'}};
+$('reveal').onclick=()=>{$('token').type=$('token').type==='password'?'text':'password'};
+refresh();clients().catch(e=>$('error').textContent=e.message);setInterval(()=>{if(!document.hidden)refresh()},5000);
+</script>
+</html>

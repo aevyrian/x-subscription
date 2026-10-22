@@ -1,12 +1,21 @@
 services:
-  gallerydl:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: gallerydl
+  xarchive:
+    build: .
     restart: unless-stopped
+    init: true
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-9090}:9090"
     volumes:
-      - /vol1/1000/Docker/GalleryDL/config:/config
-      - ${GALLERYDL_DOWNLOAD_DIR:-/vol1/1000/Docker/GalleryDL/downloads}:/downloads
+      - config:/config
+      - downloads:/downloads
+      - cache:/cache
     environment:
-      - TZ=Asia/Shanghai
+      LOGIN_PASSWORD: ${LOGIN_PASSWORD:?Set LOGIN_PASSWORD in .env}
+      TZ: ${TZ:-Asia/Taipei}
+      PROXY: ${PROXY:-}
+    stop_grace_period: 20s
+
+volumes:
+  config:
+  downloads:
+  cache:
