@@ -1,0 +1,12 @@
+body:has(.media-viewer[open]){overflow:hidden}
+dialog.media-viewer{box-sizing:border-box;width:100vw;height:100dvh;max-width:none;max-height:none;position:fixed;inset:0;margin:0;padding:0;border:0;border-radius:0;background:#080b10;color:#fff;overflow:hidden}
+.media-viewer::backdrop{background:#080b10}
+.viewer-stage{box-sizing:border-box;width:100%;height:100%;padding:64px 76px 30px;display:flex;align-items:center;justify-content:center;touch-action:pan-y}
+.viewer-stage img,.viewer-stage video{display:block;width:auto;height:auto;max-width:100%;max-height:100%;min-width:0;min-height:0;object-fit:contain;border:0;border-radius:0;background:transparent}
+.media-viewer button,.viewer-download{box-sizing:border-box;position:absolute;z-index:2;border:0;border-radius:999px;background:#ffffff16;color:#fff;text-decoration:none;display:grid;place-items:center;padding:0;cursor:pointer;font:400 30px/1 system-ui}
+.media-viewer button:hover,.viewer-download:hover{background:#ffffff32;color:white}.media-viewer button:focus-visible,.viewer-download:focus-visible{outline:2px solid #1d9bf0;outline-offset:3px}.media-viewer button:disabled{opacity:.25;cursor:default}
+.viewer-close{top:14px;left:18px;width:42px;height:42px}.viewer-download{top:16px;right:20px;font-size:14px;padding:11px 18px}.viewer-count{position:absolute;top:26px;left:50%;transform:translateX(-50%);font:15px/1 system-ui;color:#d1d9e0}
+.viewer-prev,.viewer-next{width:46px;height:60px;top:50%;transform:translateY(-50%)}.viewer-prev{left:14px}.viewer-next{right:14px}
+.media-viewer [hidden]{display:none!important}
+@media(max-width:600px){.viewer-stage{padding:62px 8px 22px}.viewer-prev,.viewer-next{width:36px;height:48px;background:#080b1080}.viewer-prev{left:6px}.viewer-next{right:6px}.viewer-close{left:10px}.viewer-download{right:10px}}
+@media(min-width:2400px){.viewer-stage{padding:90px 110px 40px}.viewer-close{width:60px;height:60px;font-size:40px}.viewer-prev,.viewer-next{width:64px;height:80px;font-size:44px}.viewer-count{font-size:22px;top:36px}.viewer-download{font-size:20px;top:22px}}

@@ -1,0 +1,26 @@
+# Standalone NAS template. Keep existing installations' data paths and settings.
+name: xarchive
+services:
+  archive:
+    build: .
+    image: xarchive:1.0.0
+    init: true
+    user: "${PUID:-10001}:${PGID:-10001}"
+    environment:
+      XARCHIVE_DATA: /data
+      # XARCHIVE_LEGACY_MEDIA: /legacy
+      # XARCHIVE_SHARE_ORIGIN: https://share.example.com
+    ports:
+      # Set XARCHIVE_BIND to your NAS LAN address to access from other devices.
+      - "${XARCHIVE_BIND:-127.0.0.1}:${XARCHIVE_PORT:-8787}:8787"
+    volumes:
+      - ./data/config:/data/config
+      - ./data/downloads:/data/downloads
+      # - /path/to/legacy-media:/legacy:ro
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

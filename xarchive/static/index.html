@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark"><title>拾存 · 私人影像与归档</title>
+  <link rel="stylesheet" href="/static/style.css?v=15"><link rel="stylesheet" href="/static/viewer.css?v=1"><script src="/static/viewer.js?v=1" defer></script><script src="/static/app.js?v=12" defer></script>
+</head>
+<body>
+  <section id="auth-screen" class="auth-screen" hidden>
+    <div class="auth-brand"><span class="brand-mark" aria-hidden="true"></span><h1>喜欢的，<br>留下来。</h1><p>一张照片，一段影像。<br>值得留住的，都在这里。</p></div>
+    <div class="auth-card"><div class="auth-wordmark">拾存</div><h2 id="auth-title">欢迎回来</h2><p id="auth-description" class="muted">打开你的私人归档。</p>
+      <form id="auth-form"><label>网站密码<input id="password" type="password" minlength="8" maxlength="256" autocomplete="current-password" required></label><button id="auth-submit" class="primary" type="submit">登录</button><p id="auth-error" role="alert" class="error"></p></form><small class="muted">拾存 · 仅属于你的 X 归档</small>
+    </div>
+  </section>
+  <div id="shell" class="shell" hidden>
+    <header class="masthead"><div class="masthead-inner">
+      <a class="brand" href="/" aria-label="拾存首页"><span class="brand-mark" aria-hidden="true"></span><span>拾存</span></a>
+      <nav aria-label="主要导航">
+        <button data-nav="archive" aria-label="首页"><span data-icon="home"></span><span>首页</span></button>
+        <button data-nav="favorites" aria-label="书签"><span data-icon="bookmark"></span><span>书签</span></button>
+        <button data-nav="bloggers" aria-label="博主"><span data-icon="users"></span><span>博主</span></button>
+        <button data-nav="subscriptions" aria-label="计划"><span data-icon="calendar"></span><span>计划</span></button>
+        <button data-nav="tasks" aria-label="下载"><span data-icon="download"></span><span>下载</span><b id="queue-badge" hidden>0</b></button>
+        <button data-nav="settings" aria-label="设置"><span data-icon="settings"></span><span>设置</span></button>
+      </nav>
+      <button id="sidebar-add" class="primary compose-button"><span data-icon="plus"></span><span>添加内容</span></button>
+      <button id="logout" class="icon-button" aria-label="退出登录" title="退出登录"><span data-icon="logout"></span></button>
+    </div></header>
+    <div class="workspace">
+    <main>
+      <header class="topbar"><div><span class="eyebrow page-eyebrow">我的私人归档</span><h1 id="page-title">首页</h1><small id="overview">正在读取归档…</small></div><button id="refresh" class="icon-button" aria-label="刷新" title="刷新"><span data-icon="refresh"></span></button><button id="add-task" class="icon-button" aria-label="添加内容" title="添加内容"><span data-icon="plus"></span></button></header>
+      <section id="archive-filters" class="filters" hidden>
+        <form id="search-form" class="search"><span data-icon="search"></span><label class="sr-only" for="search">搜索帖子</label><input id="search" type="search" maxlength="200" placeholder="搜索已保存的帖子"><button type="submit" class="quiet">搜索</button></form>
+        <div class="feed-toolbar"><div class="feed-tabs" aria-label="媒体筛选"><button data-kind="" class="active">全部</button><button data-kind="image">图片</button><button data-kind="video">视频</button></div><div class="feed-tools"><button data-action="pick-featured" class="quiet compact-featured"><span data-icon="star"></span>精选</button><select id="feed-order" aria-label="信息流排序"><option value="random">随机浏览</option><option value="timeline">时间：新到旧</option><option value="oldest">时间：旧到新</option></select><button id="shuffle-feed" class="quiet" aria-label="重新随机排列"><span data-icon="refresh"></span>换一批</button></div></div>
+        <button id="clear-filters" class="filter-reset" hidden>清除筛选</button>
+      </section>
+      <div id="filter-context" class="filter-context" hidden></div><section id="content" aria-live="polite"></section>
+      <div id="pagination" class="pagination" hidden><button id="previous">上一页</button><span id="page-number"></span><button id="next">下一页</button></div>
+      <footer>拾存 · 喜欢的，留下来。</footer>
+    </main>
+    <aside class="right-sidebar"><form id="right-search-form" class="search"><span data-icon="search"></span><input id="right-search" type="search" maxlength="200" placeholder="搜索归档" aria-label="搜索归档"></form><section class="side-panel"><div class="side-heading"><h2>精选博主</h2><button data-action="pick-featured" class="text-button">查看全部</button></div><div id="side-bloggers"></div></section><section class="archive-summary"><span class="eyebrow">我的归档</span><p id="side-summary" class="muted">正在读取归档…</p><p class="side-footnote">图片、视频与原帖，保存在自己的空间。</p></section></aside>
+    </div>
+  </div>
+  <dialog id="add-dialog"><form id="intake-form"><div class="dialog-heading"><button type="button" data-close="add-dialog" class="icon-button" aria-label="关闭"><span data-icon="close"></span></button><h2>添加内容</h2></div><label>博主或帖子链接<input id="intake-url" type="text" maxlength="2048" placeholder="@用户名 或 https://x.com/…" required></label><label id="intake-schedule-label">什么时候更新<select id="intake-schedule"><option value="monthly">每月一次</option><option value="weekly">每周一次</option><option value="daily">每天一次</option><option value="once">仅下载这一次</option></select></label><p id="intake-hint" class="muted small">首次下载全部可读取的内容，之后按计划更新。已经保存的文件会自动跳过。</p><button type="submit" class="primary">开始保存</button></form></dialog>
+  <dialog id="share-dialog" class="share-dialog"><div class="dialog-heading"><button class="icon-button" data-close="share-dialog" aria-label="关闭分享"><span data-icon="close"></span></button><h2>分享帖子</h2></div><div id="share-content"></div></dialog>
+  <dialog id="edit-dialog"><form id="edit-form"><div class="dialog-heading"><button type="button" data-close="edit-dialog" class="icon-button" aria-label="关闭"><span data-icon="close"></span></button><h2 id="edit-title">编辑</h2></div><div id="edit-fields"></div><button type="submit" class="primary">保存</button></form></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>
