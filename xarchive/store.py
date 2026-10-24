@@ -5,6 +5,7 @@ import sqlite3
 import time
 import uuid
 import calendar
+import random
 from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 from pathlib import Path
@@ -12,21 +13,70 @@ from urllib.parse import urlsplit
 
 RESERVED = set('home explore search settings i notifications messages compose intent login logout signup tos privacy jobs about download'.split())
 ACTIVE = ('queued', 'running', 'retry')
-SCHEDULES = ('once', 'daily', 'weekly', 'monthly')
+SCHEDULES = ('once', 'daily', 'three_days', 'weekly', 'monthly', 'quarterly', 'yearly')
 LOCAL_TIME = timezone(timedelta(hours=8))
+TASK_FILTERS = {'all': (), 'active': ACTIVE, 'attention': ('failed', 'retry'), 'done': ('succeeded',)}
+
+
+def in_update_window(timestamp):
+    return 8 <= datetime.fromtimestamp(timestamp, LOCAL_TIME).hour < 18
+
+
+def work_minute(day):
+    return day.replace(hour=8, minute=0, second=0, microsecond=0) + timedelta(minutes=random.randrange(600))
+
+
+def next_work_window(timestamp):
+    if in_update_window(timestamp):
+        return timestamp
+    current = datetime.fromtimestamp(timestamp, LOCAL_TIME)
+    return work_minute(current + timedelta(days=current.hour >= 18)).timestamp()
+
+
+def spread_updates(rows, timestamp, days):
+    rows = list(rows)
+    random.shuffle(rows)
+    tomorrow = datetime.fromtimestamp(timestamp, LOCAL_TIME).replace(hour=8, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    days = max(1, days)
+    minutes = days * 600
+    # Separate random draws into slots so the whole queue cannot land on one day.
+    for index, row in enumerate(rows):
+        if len(rows) >= days:
+            offset = index * days // len(rows) * 600 + random.randrange(600)
+        else:
+            low, high = index * minutes // len(rows), (index + 1) * minutes // len(rows)
+            offset = random.randrange(low, max(low + 1, high))
+        yield row, (tomorrow + timedelta(days=offset // 600, minutes=offset % 600)).timestamp()
+
+
+def task_selection(task_filter, q):
+    if task_filter not in TASK_FILTERS or not isinstance(q, str):
+        raise ValueError('无效的任务筛选条件')
+    where, args = [], []
+    if q.strip():
+        where.append("instr(lower(user || ' ' || COALESCE(post_id,'') || ' ' || id),?)>0")
+        args.append(q.strip().lower())
+    statuses = TASK_FILTERS[task_filter]
+    if statuses:
+        where.append('status IN (' + ','.join('?' for _ in statuses) + ')')
+        args.extend(statuses)
+    return (' WHERE ' + ' AND '.join(where) if where else ''), args
 
 
 def next_update(schedule, timestamp=None):
     if schedule not in SCHEDULES:
-        raise ValueError('更新频率只支持一次性、每天、每周或每月')
+        raise ValueError('无效的更新频率')
     if schedule == 'once':
         return 0
     current = datetime.fromtimestamp(time.time() if timestamp is None else timestamp, LOCAL_TIME)
-    if schedule == 'monthly':
-        year, month = current.year + (current.month == 12), current.month % 12 + 1
-        return current.replace(year=year, month=month,
-                               day=min(current.day, calendar.monthrange(year, month)[1])).timestamp()
-    return (current + timedelta(days=1 if schedule == 'daily' else 7)).timestamp()
+    if schedule in ('monthly', 'quarterly', 'yearly'):
+        months = {'monthly': 1, 'quarterly': 3, 'yearly': 12}[schedule]
+        year, month = divmod(current.year * 12 + current.month - 1 + months, 12)
+        current = current.replace(year=year, month=month + 1,
+                                  day=min(current.day, calendar.monthrange(year, month + 1)[1]))
+    else:
+        current += timedelta(days={'daily': 1, 'three_days': 3, 'weekly': 7}[schedule])
+    return work_minute(current).timestamp()
 
 
 def target(value):
@@ -85,7 +135,7 @@ class Store:
                 CREATE TABLE IF NOT EXISTS subscriptions (
                     user TEXT PRIMARY KEY REFERENCES bloggers(user), enabled INTEGER NOT NULL DEFAULT 1,
                     interval_minutes INTEGER NOT NULL DEFAULT 43200, limit_count INTEGER NOT NULL DEFAULT 0,
-                    schedule TEXT NOT NULL DEFAULT 'monthly',
+                    schedule TEXT NOT NULL DEFAULT 'quarterly',
                     next_run REAL NOT NULL, last_task TEXT);
                 CREATE TABLE IF NOT EXISTS posts (
                     id TEXT PRIMARY KEY, user TEXT NOT NULL, display_name TEXT NOT NULL DEFAULT '',
@@ -103,6 +153,7 @@ class Store:
                 CREATE TABLE IF NOT EXISTS shares (
                     post_id TEXT PRIMARY KEY REFERENCES posts(id), token TEXT NOT NULL UNIQUE, created REAL NOT NULL);
             ''')
+            db.execute('BEGIN IMMEDIATE')
             columns = {r['name'] for r in db.execute('PRAGMA table_info(subscriptions)')}
             if 'schedule' not in columns:
                 db.execute("ALTER TABLE subscriptions ADD COLUMN schedule TEXT NOT NULL DEFAULT 'monthly'")
@@ -112,6 +163,8 @@ class Store:
                                (cadence, next_update(cadence), row['user']))
             if 'scanned_posts' not in {r['name'] for r in db.execute('PRAGMA table_info(tasks)')}:
                 db.execute('ALTER TABLE tasks ADD COLUMN scanned_posts INTEGER NOT NULL DEFAULT 0')
+            if 'generation' not in {r['name'] for r in db.execute('PRAGMA table_info(tasks)')}:
+                db.execute('ALTER TABLE tasks ADD COLUMN generation INTEGER NOT NULL DEFAULT 0')
             blogger_columns = {r['name'] for r in db.execute('PRAGMA table_info(bloggers)')}
             for name, declaration in (('avatar_url', "TEXT NOT NULL DEFAULT ''"), ('featured', 'INTEGER NOT NULL DEFAULT 0')):
                 if name not in blogger_columns:
@@ -119,6 +172,16 @@ class Store:
             if not db.execute("SELECT 1 FROM settings WHERE key='all_downloads_v2'").fetchone():
                 db.execute("INSERT INTO settings VALUES ('all_downloads_v2','true')")
                 db.execute("INSERT INTO settings VALUES ('timeout_minutes','0') ON CONFLICT(key) DO UPDATE SET value='0'")
+            if not db.execute("SELECT 1 FROM settings WHERE key='quarterly_schedule_v1'").fetchone():
+                now = time.time()
+                current = datetime.fromtimestamp(now, LOCAL_TIME)
+                end = datetime.fromtimestamp(next_update('quarterly', now), LOCAL_TIME)
+                days = max(1, (end.date() - current.date()).days - 1)
+                rows = db.execute('SELECT user FROM subscriptions').fetchall()
+                for row, due in spread_updates(rows, now, days):
+                    db.execute("UPDATE subscriptions SET schedule='quarterly',limit_count=0,next_run=? WHERE user=?", (due, row['user']))
+                db.execute("INSERT INTO settings VALUES ('default_schedule','\"quarterly\"') ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+                db.execute("INSERT INTO settings VALUES ('quarterly_schedule_v1','true')")
 
     @contextmanager
     def connect(self):
@@ -161,6 +224,9 @@ class Store:
         existing = db.execute("SELECT * FROM tasks WHERE user=? AND post_id IS ? AND status IN ('queued','running','retry')",
                               (parsed['user'], parsed['post_id'])).fetchone()
         if existing:
+            if source != 'scheduled' and existing['source'] == 'scheduled' and existing['status'] in ('queued', 'retry'):
+                db.execute('UPDATE tasks SET source=?,next_run=? WHERE id=?', (source, time.time(), existing['id']))
+                existing = db.execute('SELECT * FROM tasks WHERE id=?', (existing['id'],)).fetchone()
             return dict(existing), True
         self.add_blogger(parsed['user'], db)
         identifier, now = uuid.uuid4().hex, time.time()
@@ -169,7 +235,7 @@ class Store:
                    (identifier, parsed['user'], parsed['post_id'], parsed['url'], limit, source, now, now))
         return dict(db.execute('SELECT * FROM tasks WHERE id=?', (identifier,)).fetchone()), False
 
-    def subscribe(self, value, schedule='monthly'):
+    def subscribe(self, value, schedule='quarterly'):
         parsed = target(value)
         if parsed['post_id']:
             raise ValueError('订阅需要博主主页')
@@ -188,45 +254,125 @@ class Store:
         return self.execute('UPDATE subscriptions SET schedule=?,enabled=?,limit_count=0,next_run=? WHERE user=?',
                             (schedule, enabled and schedule != 'once', due, user))
 
-    def schedule(self):
-        now = time.time()
+    def schedule(self, timestamp=None):
+        now = time.time() if timestamp is None else timestamp
+        if not in_update_window(now):
+            return 0
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            for sub in db.execute("SELECT * FROM subscriptions WHERE enabled=1 AND schedule!='once' AND next_run<=?", (now,)).fetchall():
-                task, _ = self.submit(sub['user'], 0, 'subscription', db)
-                db.execute('UPDATE subscriptions SET next_run=?,last_task=? WHERE user=?',
-                           (next_update(sub['schedule'], now), task['id'], sub['user']))
+            self._spread_overdue(db, now)
+            dispatch = db.execute("SELECT value FROM settings WHERE key IN ('scheduled_dispatch_after','scheduled_claim_after')").fetchall()
+            if any(json.loads(row['value']) > now for row in dispatch):
+                return 0
+            sub = db.execute("SELECT * FROM subscriptions WHERE enabled=1 AND schedule!='once' AND next_run<=? ORDER BY next_run,user LIMIT 1", (now,)).fetchone()
+            if not sub:
+                return 0
+            task, duplicate = self.submit(sub['user'], 0, 'scheduled', db)
+            if not duplicate:
+                db.execute('UPDATE tasks SET next_run=?,created=? WHERE id=?', (now, now, task['id']))
+            db.execute('UPDATE subscriptions SET next_run=?,last_task=? WHERE user=?',
+                       (next_update(sub['schedule'], now), task['id'], sub['user']))
+            db.execute("INSERT INTO settings VALUES ('scheduled_dispatch_after',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                       (json.dumps(now + random.randint(15, 30) * 60),))
+            return int(not duplicate)
 
-    def recover(self):
-        self.execute("""UPDATE tasks SET status='queued', started=NULL, finished=NULL, error=NULL,
-                        attempts=MAX(attempts-1,0),next_run=? WHERE status='running'""", (time.time(),))
-
-    def claim(self):
+    def recover(self, timestamp=None):
+        now = time.time() if timestamp is None else timestamp
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
+            db.execute("""UPDATE tasks SET status='queued', started=NULL, finished=NULL, error=NULL,
+                          generation=generation+1,attempts=MAX(attempts-1,0),
+                          next_run=CASE WHEN source='scheduled' THEN ? ELSE ? END WHERE status='running'""",
+                       (next_work_window(now), now))
+            self._spread_overdue(db, now)
+
+    def _spread_overdue(self, db, now):
+        midnight = datetime.fromtimestamp(now, LOCAL_TIME).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        rows = [('subscription', row['user']) for row in db.execute("SELECT user FROM subscriptions WHERE enabled=1 AND schedule!='once' AND next_run<?", (midnight,))]
+        rows += [('task', row['id']) for row in db.execute("SELECT id FROM tasks WHERE source='scheduled' AND status IN ('queued','retry') AND next_run<?", (midnight,))]
+        for (kind, identifier), due in spread_updates(rows, now, 3):
+            if kind == 'subscription':
+                db.execute('UPDATE subscriptions SET next_run=? WHERE user=?', (due, identifier))
+            else:
+                db.execute('UPDATE tasks SET next_run=? WHERE id=?', (due, identifier))
+
+    def claim(self, timestamp=None):
+        now = time.time() if timestamp is None else timestamp
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            dispatch = db.execute("SELECT value FROM settings WHERE key='scheduled_claim_after'").fetchone()
+            automatic_allowed = in_update_window(now) and (not dispatch or json.loads(dispatch['value']) <= now)
             row = db.execute("""SELECT * FROM tasks WHERE status IN ('queued','retry') AND next_run<=?
-                                ORDER BY created LIMIT 1""", (time.time(),)).fetchone()
+                                AND (source!='scheduled' OR ?) ORDER BY created LIMIT 1""", (now, automatic_allowed)).fetchone()
             if not row:
                 return None
-            db.execute("""UPDATE tasks SET status='running',attempts=attempts+1,started=?,
-                          finished=NULL,error=NULL,progress=0 WHERE id=?""", (time.time(), row['id']))
+            db.execute("""UPDATE tasks SET status='running',attempts=attempts+1,generation=generation+1,started=?,
+                          finished=NULL,error=NULL,progress=0 WHERE id=?""", (now, row['id']))
+            if row['source'] == 'scheduled':
+                db.execute("INSERT INTO settings VALUES ('scheduled_claim_after',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                           (json.dumps(now + random.randint(15, 30) * 60),))
             return dict(db.execute('SELECT * FROM tasks WHERE id=?', (row['id'],)).fetchone())
 
     def cancel(self, identifier):
         return self.execute("""UPDATE tasks SET status='cancelled',finished=?
-                              WHERE id=? AND status IN ('queued','running','retry')""", (time.time(), identifier))
+                              WHERE id=? AND status IN ('queued','running','retry','failed')""", (time.time(), identifier))
 
     def retry(self, identifier):
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            row = db.execute("SELECT * FROM tasks WHERE id=? AND status IN ('failed','cancelled')", (identifier,)).fetchone()
+            row = db.execute("SELECT * FROM tasks WHERE id=? AND status IN ('failed','cancelled','retry')", (identifier,)).fetchone()
             if not row:
-                raise ValueError('只能重试失败或取消的任务')
-            existing = db.execute("SELECT id FROM tasks WHERE url=? AND status IN ('queued','running','retry')", (row['url'],)).fetchone()
-            if existing:
+                raise ValueError('只能重试失败、取消或等待重试的任务')
+            if not self._retry_task(db, row):
                 raise ValueError('该对象已有活动任务')
-            db.execute("""UPDATE tasks SET status='queued',attempts=0,next_run=?,finished=NULL,
-                          started=NULL,error=NULL WHERE id=?""", (time.time(), identifier))
+
+    def _retry_task(self, db, row):
+        if db.execute("SELECT 1 FROM tasks WHERE url=? AND id!=? AND status IN ('queued','running','retry')", (row['url'], row['id'])).fetchone():
+            return 0
+        return db.execute("""UPDATE tasks SET status='queued',source='website',attempts=0,next_run=?,finished=NULL,
+                            started=NULL,error=NULL WHERE id=?""", (time.time(), row['id'])).rowcount
+
+    def delete_task(self, identifier):
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT status FROM tasks WHERE id=?', (identifier,)).fetchone()
+            if not row:
+                return 0
+            if row['status'] not in ('succeeded', 'failed', 'cancelled'):
+                raise ValueError('活动任务请先取消，再删除记录')
+            db.execute('UPDATE subscriptions SET last_task=NULL WHERE last_task=?', (identifier,))
+            return db.execute('DELETE FROM tasks WHERE id=?', (identifier,)).rowcount
+
+    def list_tasks(self, task_filter='all', q='', limit=100, offset=0):
+        query_where, query_args = task_selection('all', q)
+        where, args = task_selection(task_filter, q)
+        with self.connect() as db:
+            db.execute('BEGIN')
+            grouped = {row['status']: row['n'] for row in db.execute('SELECT status,COUNT(*) n FROM tasks' + query_where + ' GROUP BY status', query_args)}
+            counts = {name: sum(grouped.values()) if not statuses else sum(grouped.get(status, 0) for status in statuses)
+                      for name, statuses in TASK_FILTERS.items()}
+            items = [dict(row) for row in db.execute('''SELECT t.*,(SELECT COUNT(*) FROM posts p WHERE p.user=t.user) archive_posts
+                                                       FROM tasks t''' + where + ' ORDER BY created DESC,id DESC LIMIT ? OFFSET ?',
+                                                      [*args, max(1, min(limit, 200)), max(0, offset)])]
+            return {'items': items, 'total': counts[task_filter], 'counts': counts}
+
+    def bulk_tasks(self, action, task_filter='all', q=''):
+        if action not in ('cancel', 'retry', 'delete'):
+            raise ValueError('无效的批量操作')
+        where, args = task_selection(task_filter, q)
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            rows = db.execute('SELECT * FROM tasks' + where + ' ORDER BY created DESC,id DESC', args).fetchall()
+            affected = 0
+            for row in rows:
+                if action == 'cancel' and row['status'] in (*ACTIVE, 'failed'):
+                    affected += db.execute("UPDATE tasks SET status='cancelled',finished=? WHERE id=?", (time.time(), row['id'])).rowcount
+                elif action == 'retry' and row['status'] in ('failed', 'cancelled', 'retry'):
+                    affected += self._retry_task(db, row)
+                elif action == 'delete' and row['status'] in ('succeeded', 'failed', 'cancelled'):
+                    db.execute('UPDATE subscriptions SET last_task=NULL WHERE last_task=?', (row['id'],))
+                    affected += db.execute('DELETE FROM tasks WHERE id=?', (row['id'],)).rowcount
+            return {'affected': affected, 'skipped': len(rows) - affected, 'matched': len(rows)}
 
     def finish(self, task, result=None, error=None, retry_after=None):
         with self.connect() as db:
@@ -234,12 +380,15 @@ class Store:
                 limited = retry_after is not None
                 status = 'retry' if limited or task['attempts'] < task['max_attempts'] else 'failed'
                 delay = max(1, retry_after) if limited else 30 * 2 ** (task['attempts'] - 1)
+                due = time.time() + delay
+                if task['source'] == 'scheduled':
+                    due = next_work_window(due)
                 db.execute('''UPDATE tasks SET status=?,error=?,attempts=MAX(attempts-?,0),next_run=?,finished=?
-                              WHERE id=? AND status='running' ''',
-                           (status, error, int(limited), time.time() + delay,
-                            time.time(), task['id']))
+                              WHERE id=? AND status='running' AND generation=? ''',
+                           (status, error, int(limited), due,
+                            time.time(), task['id'], task['generation']))
             else:
                 posts, media = result or (0, 0)
                 db.execute("""UPDATE tasks SET status='succeeded',new_posts=new_posts+?,
-                              new_media=new_media+?,finished=?,error=NULL WHERE id=? AND status='running'""",
-                           (posts, media, time.time(), task['id']))
+                              new_media=new_media+?,finished=?,error=NULL WHERE id=? AND status='running' AND generation=?""",
+                           (posts, media, time.time(), task['id'], task['generation']))

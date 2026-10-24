@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         拾存 · X 下载与归档
 // @namespace    xarchive.personal
-// @version      1.4.4
+// @version      1.4.5
 // @description  下载帖子、推送博主、订阅更新，并打开自己的归档。
 // @match        https://x.com/*
 // @match        https://www.x.com/*
@@ -39,7 +39,8 @@
           <button id="profile" title="保存此博主的全部可读取内容">添加博主订阅</button>
           <button id="archive">打开对应归档 ↗</button>
         </div>
-        <label>什么时候更新 <select id="schedule" aria-label="更新频率"><option value="monthly">每月一次</option><option value="weekly">每周一次</option><option value="daily">每天一次</option><option value="once">仅下载这一次</option></select></label>
+        <label>什么时候更新 <select id="schedule" aria-label="更新频率"><option value="three_days">每三天一次</option><option value="weekly">每七天一次</option><option value="monthly">每月一次</option><option value="quarterly">每季度一次</option><option value="yearly">每年一次</option><option value="once">仅下载这一次</option></select></label>
+        <small>自动更新在北京时间 08:00–18:00 随机开始，已开始的下载可继续完成。</small>
       </div>
       <form id="settings-view" hidden>
         <label>归档网站地址<input id="server" type="url" placeholder="https://your-archive.example" required></label>
@@ -58,7 +59,9 @@
   let connectionState = base && token ? 'checking' : 'unconfigured', connectionGeneration = 0;
   let currentTask = null, pollError = '';
   const active = () => currentTask && ['submitting','queued','running','retry'].includes(currentTask.status);
-  $('schedule').value = GM_getValue('schedule','monthly');
+  const savedSchedule = GM_getValue('schedule','quarterly');
+  if (savedSchedule === 'daily') $('schedule').innerHTML += '<option value="daily">每天（旧计划）</option>';
+  $('schedule').value = savedSchedule;
 
   function parse(path) {
     const p = path.split('/').filter(Boolean);

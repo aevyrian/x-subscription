@@ -37,10 +37,11 @@ class Worker:
     def healthy(self):
         return bool(self.thread and self.thread.is_alive() and time.monotonic() - self.last_tick < 300)
 
-    def interrupted(self, identifier):
+    def interrupted(self, identifier, generation=None):
         self.last_tick = time.monotonic()
-        rows = self.store.query('SELECT status FROM tasks WHERE id=?', (identifier,))
-        return self.stop_event.is_set() or not rows or rows[0]['status'] != 'running'
+        rows = self.store.query('SELECT status,generation FROM tasks WHERE id=?', (identifier,))
+        return (self.stop_event.is_set() or not rows or rows[0]['status'] != 'running'
+                or generation is not None and rows[0]['generation'] != generation)
 
     def run_one(self):
         task = self.store.claim()
@@ -51,8 +52,8 @@ class Worker:
         try:
             if self.runner is None:
                 raise DownloadError('下载引擎尚未接入')
-            result = self.runner(task, lambda: self.interrupted(task['id']),
-                                 lambda n: self.store.execute('UPDATE tasks SET progress=? WHERE id=?', (n, task['id'])))
+            result = self.runner(task, lambda: self.interrupted(task['id'], task['generation']),
+                                 lambda n: self.store.execute("UPDATE tasks SET progress=? WHERE id=? AND generation=? AND status='running'", (n, task['id'], task['generation'])))
         except Interrupted:
             was_interrupted = True
         except DownloadError as exc:
@@ -67,7 +68,7 @@ class Worker:
                 if was_interrupted:
                     # A stopped service resumes this item; a user cancellation stays cancelled.
                     self.store.execute("""UPDATE tasks SET status='queued',attempts=MAX(attempts-1,0),next_run=?
-                                          WHERE id=? AND status='running'""", (time.time(), task['id']))
+                                          WHERE id=? AND status='running' AND generation=?""", (time.time(), task['id'], task['generation']))
                 else:
                     self.store.finish(task, result=result, error=error, retry_after=retry_after)
                 break

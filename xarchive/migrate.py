@@ -40,7 +40,7 @@ def import_legacy(store, media, subscriptions=None, history=None, favorites=None
             for row in rows:
                 try:
                     user = target(row.get('url') or row.get('user'))['user']
-                    schedule = row.get('frequency', 'monthly')
+                    schedule = row.get('frequency', 'quarterly')
                     if schedule not in SCHEDULES:
                         raise ValueError('旧订阅频率无法映射')
                 except (ValueError, AttributeError):

@@ -89,7 +89,7 @@ class Engine:
             with self.store.connect() as db:
                 posts, media = index_folder(self.store, task['user'], db=db)
                 db.execute('''UPDATE tasks SET new_posts=new_posts+?,new_media=new_media+?,scanned_posts=?
-                              WHERE id=?''', (posts, media, scanned[0], task['id']))
+                              WHERE id=? AND generation=?''', (posts, media, scanned[0], task['id'], task['generation']))
 
         try:
             with os.fdopen(fd, 'w', encoding='utf-8') as stream:
@@ -128,7 +128,7 @@ class Engine:
                     break
                 if (count[0], scanned[0]) != reported:
                     progress(count[0])
-                    self.store.execute('UPDATE tasks SET scanned_posts=? WHERE id=?', (scanned[0],task['id']))
+                    self.store.execute('UPDATE tasks SET scanned_posts=? WHERE id=? AND generation=?', (scanned[0], task['id'], task['generation']))
                     reported = (count[0], scanned[0])
                 if time.monotonic() - last_index >= 5:
                     index_saved()

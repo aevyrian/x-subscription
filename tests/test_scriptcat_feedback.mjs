@@ -3,12 +3,13 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 const source=fs.readFileSync(new URL('../xarchive/integration/xarchive.user.js',import.meta.url),'utf8');
-function harness(resume=false,server='https://archive.test') {
+function harness(resume=false,server='https://archive.test',schedule) {
   const nodes=new Map(), requests=[], timers=new Map(), intervals=[], values=new Map([['server',server],['token','test-only']]);
   if(resume)values.set('activeTask',{server,id:'job'});
+  if(schedule!==undefined)values.set('schedule',schedule);
   let now=1_792_800_000_000, serial=0;
   const node=id=>{
-    if(!nodes.has(id))nodes.set(id,{hidden:['section','settings-view','feedback'].includes(id),disabled:false,textContent:'',value:'',style:{setProperty(){}},
+    if(!nodes.has(id))nodes.set(id,{hidden:['section','settings-view','feedback'].includes(id),disabled:false,textContent:'',innerHTML:'',value:'',style:{setProperty(){}},
       classList:{values:new Set(),toggle(key,on){on?this.values.add(key):this.values.delete(key);},contains(key){return this.values.has(key);}},setAttribute(){}});
     return nodes.get(id);
   };
@@ -28,6 +29,7 @@ function harness(resume=false,server='https://archive.test') {
   return {node,requests,timers,intervals,values,reply,flush,advance:ms=>{now+=ms;intervals.forEach(fn=>fn());},runTimer:()=>{const [id,t]=timers.entries().next().value;timers.delete(id);t.fn();}};
 }
 const app=harness();
+assert.equal(app.node('schedule').value,'quarterly','New script connections default to quarterly');
 app.reply(0,{ok:true,method:'password'});await app.flush();
 assert.equal(app.node('post').disabled,false);
 const submit=app.node('post').onclick();
@@ -96,4 +98,14 @@ const secureSave=secure.node('settings-view').onsubmit({preventDefault(){}});
 assert.equal(secure.requests[1].url,'https://secure.example/api/v1/connection/check');
 secure.reply(1,{ok:true,method:'password'});await secureSave;
 assert.equal(secure.values.get('server'),'https://secure.example');
+for(const schedule of [undefined,'monthly','daily']){
+  const legacySchedule=harness(false,'https://archive.test',schedule);
+  const expected=schedule||'quarterly';
+  assert.equal(legacySchedule.node('schedule').value,expected,'Saved schedule preferences must not be reset');
+  if(schedule==='daily')assert.match(legacySchedule.node('schedule').innerHTML,/每天（旧计划）/);
+  legacySchedule.reply(0,{ok:true,method:'password'});await legacySchedule.flush();
+  const submitted=legacySchedule.node('profile').onclick();
+  assert.equal(JSON.parse(legacySchedule.requests[1].data).schedule,expected);
+  legacySchedule.reply(1,{task:{id:'legacy-schedule',user:'example',status:'queued',created:Date.now()/1000}});await submitted;
+}
 console.log('ScriptCat feedback, polling, resume, HTTPS and private IPv4 HTTP boundary checks passed');

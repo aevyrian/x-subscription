@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
@@ -39,10 +39,14 @@ class Password(Body):
     password: SecretStr = Field(min_length=8, max_length=256)
 
 
+Schedule = Literal['once', 'daily', 'three_days', 'weekly', 'monthly', 'quarterly', 'yearly']
+TaskFilter = Literal['all', 'active', 'attention', 'done']
+
+
 class Intake(Body):
     url: str = Field(min_length=1, max_length=2048)
     mode: str = Field(default='subscribe', pattern='^(download|blogger|subscribe|once)$')
-    schedule: Literal['once', 'daily', 'weekly', 'monthly'] = 'monthly'
+    schedule: Schedule = 'quarterly'
     # Older installed widgets send these fields; scope is always all posts.
     limit: int = Field(default=0, ge=0, le=10000)
     interval_minutes: int | None = None
@@ -56,7 +60,13 @@ class BloggerEdit(Body):
 
 class SubscriptionEdit(Body):
     enabled: bool = True
-    schedule: Literal['once', 'daily', 'weekly', 'monthly'] = 'monthly'
+    schedule: Schedule = 'quarterly'
+
+
+class TaskBulk(Body):
+    action: Literal['cancel', 'retry', 'delete']
+    filter: TaskFilter = 'all'
+    q: str = Field(default='', max_length=200)
 
 
 class ClientNew(Body):
@@ -68,7 +78,7 @@ class SettingsEdit(Body):
     clear_cookies: bool = False
     x_proxy: SecretStr | None = Field(default=None, max_length=2048)
     clear_proxy: bool = False
-    default_schedule: Literal['once', 'daily', 'weekly', 'monthly'] = 'monthly'
+    default_schedule: Schedule = 'quarterly'
 
 
 class PostEdit(Body):
@@ -271,10 +281,13 @@ def create_app(data_dir=None, run_worker=True, runner=None):
         return '/?post=' + task['post_id'] if task['post_id'] else '/?user=' + task['user']
 
     @app.get('/api/v1/tasks')
-    def tasks(limit: int = 100, offset: int = 0, _=Depends(admin)):
-        return {'items': store.query('''SELECT t.*,(SELECT COUNT(*) FROM posts p WHERE p.user=t.user) archive_posts
-                                     FROM tasks t ORDER BY created DESC LIMIT ? OFFSET ?''',
-                                    (max(1, min(limit, 200)), max(0, offset)))}
+    def tasks(limit: int = 100, offset: int = 0, filter: TaskFilter = 'all',
+              q: str = Query(default='', max_length=200), _=Depends(admin)):
+        return store.list_tasks(filter, q, max(1, min(limit, 200)), max(0, offset))
+
+    @app.post('/api/v1/tasks/bulk')
+    def bulk_tasks(body: TaskBulk, _=Depends(admin)):
+        return store.bulk_tasks(body.action, body.filter, body.q)
 
     @app.get('/api/v1/tasks/{identifier}')
     def task_detail(identifier: str, _=Depends(identity)):
@@ -290,6 +303,13 @@ def create_app(data_dir=None, run_worker=True, runner=None):
                 raise HTTPException(409, '该任务已结束或不存在')
         elif action == 'retry':
             store.retry(identifier)
+        elif action == 'delete':
+            try:
+                removed = store.delete_task(identifier)
+            except ValueError:
+                raise HTTPException(409, '活动任务请先取消，再删除记录') from None
+            if not removed:
+                raise HTTPException(409, '任务仍在进行或不存在，请先取消')
         else:
             raise HTTPException(404, '操作不存在')
         return {'ok': True}
@@ -375,7 +395,7 @@ def create_app(data_dir=None, run_worker=True, runner=None):
                 'connection_password_configured': bool(store.setting('connection_password')),
                 'proxy_configured': bool(store.setting('x_proxy')),
                 'legacy_attached': bool(store.legacy),
-                'default_schedule': store.setting('default_schedule', 'monthly'),
+                'default_schedule': store.setting('default_schedule', 'quarterly'),
                 'engine_version': gallery_dl.version.__version__, 'data_dir': str(store.root)}
 
     @app.put('/api/v1/settings')
@@ -447,7 +467,7 @@ def create_app(data_dir=None, run_worker=True, runner=None):
     @app.get('/')
     def index():
         if (STATIC / 'index.html').exists():
-            html = re.sub(r'src="/static/app\.js(?:\?[^\"]*)?"', 'src="/static/app.js?v=1.4.0"', (STATIC / 'index.html').read_text(encoding='utf-8'))
+            html = (STATIC / 'index.html').read_text(encoding='utf-8')
             return HTMLResponse(html, headers={'Cache-Control': 'no-cache'})
         return {'message': 'X Archive API is running'}
 

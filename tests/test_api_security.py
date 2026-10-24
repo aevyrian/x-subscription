@@ -105,6 +105,7 @@ class ApiSecurityTest(unittest.TestCase):
 
     def test_invalid_proxy_does_not_echo_credentials_or_partially_save_settings(self):
         self.app.state.store.set_setting('x_proxy', 'http://127.0.0.1:7890')
+        self.app.state.store.set_setting('default_schedule', 'monthly')
         invalid = ('ftp://proxy.example:7890', 'socks5://proxy.example:7890',
                    'socks5h://proxy.example:7890', 'http://', 'http://proxy.example:bad',
                    'http://proxy.example:0', 'http://proxy.example:65536',
