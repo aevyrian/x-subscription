@@ -1,0 +1,15 @@
+name: xarchive
+services:
+  archive:
+    build: .
+    image: xarchive:local
+    init: true
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - archive-data:/data
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+volumes:
+  archive-data:

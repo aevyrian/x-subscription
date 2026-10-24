@@ -1,0 +1,6 @@
+**
+!requirements.txt
+!xarchive/
+!xarchive/**
+**/__pycache__/
+**/*.pyc

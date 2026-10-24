@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.py[cod]
+data/
+.env
+.env.*
+*.sqlite*
+*.db
+cookies*
+*.log
+.pytest_cache/
+.work/
+*.bak
+AGENTS.md
