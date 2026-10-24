@@ -37,12 +37,39 @@ class EngineReliabilityTests(unittest.TestCase):
     def completed_process(self, output):
         return SimpleNamespace(returncode=0, stdout=io.StringIO(output), poll=lambda: 0)
 
+    def test_cookie_snapshot_keeps_its_matching_revision(self):
+        self.store.set_setting('x_cookie_revision', 3)
+        config = self.engine.config(self.job)
+        self.store.set_setting('x_cookie_revision', 4)
+        self.store.set_setting('x_cookies', {'auth_token': 'fixture-replacement'})
+        self.assertEqual(self.job['cookie_revision'], 3)
+        self.assertEqual(config['extractor']['twitter']['cookies'], {'auth_token': 'test-only'})
+
     def test_rate_limit_yields_even_with_zero_exit_code(self):
         process = self.completed_process('XARCHIVE_POST\n[twitter][error] Rate limit exceeded\n')
         with patch('xarchive.engine.subprocess.Popen', return_value=process):
             with self.assertRaises(DownloadError) as caught:
                 self.engine(self.job, lambda: False, lambda n: None)
         self.assertEqual(caught.exception.retry_after, 900)
+
+    def test_recovered_media_429_warning_does_not_fail_successful_task(self):
+        process = self.completed_process('[downloader.http][warning] 429 Too Many Requests; trying fallback\nXARCHIVE_POST\nXARCHIVE_SAVED\n')
+        with patch('xarchive.engine.subprocess.Popen', return_value=process):
+            self.assertEqual(self.engine(self.job, lambda: False, lambda n: None), (0, 0))
+
+    def test_ratelimit_username_in_warning_is_not_an_account_limit(self):
+        process = self.completed_process('[twitter][warning] 503: https://x.com/ratelimit/status/429\nXARCHIVE_POST\n')
+        with patch('xarchive.engine.subprocess.Popen', return_value=process):
+            self.assertEqual(self.engine(self.job, lambda: False, lambda n: None), (0, 0))
+
+    def test_ratelimit_url_on_failed_process_does_not_classify_as_account_limit(self):
+        process = self.completed_process('[twitter][error] HTTP 503: https://x.com/ratelimit/status/429\n')
+        process.returncode = 1
+        with patch('xarchive.engine.subprocess.Popen', return_value=process):
+            with self.assertRaises(DownloadError) as caught:
+                self.engine(self.job, lambda: False, lambda n: None)
+        self.assertIsNone(caught.exception.retry_after)
+        self.assertNotIn('限流', str(caught.exception))
 
     def test_gallery_rate_limit_aborts_instead_of_sleeping(self):
         twitter = self.engine.config(self.job)['extractor']['twitter']

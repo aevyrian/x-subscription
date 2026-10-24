@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         拾存 · X 下载与归档
 // @namespace    xarchive.personal
-// @version      1.4.5
+// @version      1.4.6
 // @description  下载帖子、推送博主、订阅更新，并打开自己的归档。
 // @match        https://x.com/*
 // @match        https://www.x.com/*
@@ -59,6 +59,10 @@
   let connectionState = base && token ? 'checking' : 'unconfigured', connectionGeneration = 0;
   let currentTask = null, pollError = '';
   const active = () => currentTask && ['submitting','queued','running','retry'].includes(currentTask.status);
+  if (!GM_getValue('quarterlyDefaultV1',false)) {
+    GM_setValue('schedule','quarterly');
+    GM_setValue('quarterlyDefaultV1',true);
+  }
   const savedSchedule = GM_getValue('schedule','quarterly');
   if (savedSchedule === 'daily') $('schedule').innerHTML += '<option value="daily">每天（旧计划）</option>';
   $('schedule').value = savedSchedule;

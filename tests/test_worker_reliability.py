@@ -92,8 +92,9 @@ class WorkerReliabilityTests(unittest.TestCase):
         worker = Worker(self.store, limited)
         for _ in range(4):
             self.store.execute('UPDATE tasks SET next_run=0')
-            before = time.time()
-            worker.run_one()
+            before = max(time.time(), self.store.setting('x_rate_limit_until', 0) + 1)
+            with patch('xarchive.store.time.time', return_value=before):
+                worker.run_one()
             row = self.store.query('SELECT * FROM tasks')[0]
             self.assertEqual((row['status'], row['attempts']), ('retry', 1))
             self.assertGreaterEqual(row['next_run'], before + 900)

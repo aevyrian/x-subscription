@@ -3,10 +3,11 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 const source=fs.readFileSync(new URL('../xarchive/integration/xarchive.user.js',import.meta.url),'utf8');
-function harness(resume=false,server='https://archive.test',schedule) {
+function harness(resume=false,server='https://archive.test',schedule,migrated=false) {
   const nodes=new Map(), requests=[], timers=new Map(), intervals=[], values=new Map([['server',server],['token','test-only']]);
   if(resume)values.set('activeTask',{server,id:'job'});
   if(schedule!==undefined)values.set('schedule',schedule);
+  if(migrated)values.set('quarterlyDefaultV1',true);
   let now=1_792_800_000_000, serial=0;
   const node=id=>{
     if(!nodes.has(id))nodes.set(id,{hidden:['section','settings-view','feedback'].includes(id),disabled:false,textContent:'',innerHTML:'',value:'',style:{setProperty(){}},
@@ -98,11 +99,15 @@ const secureSave=secure.node('settings-view').onsubmit({preventDefault(){}});
 assert.equal(secure.requests[1].url,'https://secure.example/api/v1/connection/check');
 secure.reply(1,{ok:true,method:'password'});await secureSave;
 assert.equal(secure.values.get('server'),'https://secure.example');
-for(const schedule of [undefined,'monthly','daily']){
-  const legacySchedule=harness(false,'https://archive.test',schedule);
-  const expected=schedule||'quarterly';
-  assert.equal(legacySchedule.node('schedule').value,expected,'Saved schedule preferences must not be reset');
-  if(schedule==='daily')assert.match(legacySchedule.node('schedule').innerHTML,/每天（旧计划）/);
+for(const [schedule,migrated,expected] of [['monthly',false,'quarterly'],['daily',false,'quarterly'],[undefined,false,'quarterly'],
+  ['weekly',true,'weekly'],['monthly',true,'monthly'],['yearly',true,'yearly'],['daily',true,'daily']]){
+  const legacySchedule=harness(false,'https://archive.test',schedule,migrated);
+  assert.equal(legacySchedule.node('schedule').value,expected,'The quarterly default migration runs once, then preserves manual choices');
+  assert.equal(legacySchedule.values.get('quarterlyDefaultV1'),true);
+  assert.equal(legacySchedule.values.get('schedule'),expected);
+  assert.equal(legacySchedule.values.get('server'),'https://archive.test');
+  assert.equal(legacySchedule.values.get('token'),'test-only','Changing the default must not touch connection credentials');
+  if(expected==='daily')assert.match(legacySchedule.node('schedule').innerHTML,/每天（旧计划）/);
   legacySchedule.reply(0,{ok:true,method:'password'});await legacySchedule.flush();
   const submitted=legacySchedule.node('profile').onclick();
   assert.equal(JSON.parse(legacySchedule.requests[1].data).schedule,expected);

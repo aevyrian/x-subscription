@@ -84,12 +84,67 @@ def index_folder(store, user, legacy=False, db=None):
     return new_posts, new_media
 
 
-def list_posts(store, q='', user='', post='', favorite=False, tag='', kind='', limit=30, offset=0,
-               order='timeline', seed='', snapshot=0):
+def blogger_match(q):
+    name = q.strip().lower()[:200]
+    handle = name.removeprefix('@') or name
+    return '''(instr(lower(b.user),?)>0 OR instr(lower(b.display_name),?)>0 OR EXISTS
+               (SELECT 1 FROM posts history WHERE history.user=b.user AND instr(lower(history.display_name),?)>0))''', [handle, name, name]
+
+
+def list_bloggers(store, q='', user='', featured=False, limit=None):
+    q, user = q.strip()[:200], user.strip().removeprefix('@').lower()
     where, args = [], []
     if q:
-        where.append('(content LIKE ? OR display_name LIKE ? OR user LIKE ? OR tags LIKE ? OR note LIKE ?)')
-        args.extend(['%' + q[:200] + '%'] * 5)
+        condition, values = blogger_match(q)
+        where.append(condition)
+        args.extend(values)
+    if user:
+        where.append('b.user=?')
+        args.append(user)
+    if featured:
+        where.append('b.featured=1')
+    clause = ' WHERE ' + ' AND '.join(where) if where else ''
+    ordering = 'b.featured DESC,b.created DESC,b.user'
+    order_args = []
+    if q:
+        ordering = 'CASE WHEN b.user=? THEN 0 ELSE 1 END,' + ordering
+        order_args.append(q.lower().removeprefix('@'))
+    with store.connect() as db:
+        db.execute('BEGIN')
+        total = db.execute('SELECT COUNT(*) n FROM bloggers b' + clause, args).fetchone()['n']
+        sql = '''SELECT b.*,
+                 (SELECT COUNT(*) FROM posts p WHERE p.user=b.user) post_count,
+                 (SELECT COUNT(*) FROM media m JOIN posts p ON p.id=m.post_id WHERE p.user=b.user) media_count,
+                 (SELECT COUNT(*) FROM posts p WHERE p.user=b.user AND p.favorite=1) favorite_count,
+                 (SELECT p.posted_at FROM posts p WHERE p.user=b.user ORDER BY length(p.id) DESC,p.id DESC LIMIT 1) last_post_at,
+                 COALESCE(s.enabled,0) subscribed,COALESCE(s.enabled,0) enabled,s.schedule,s.next_run,
+                 a.id active_id,a.status active_status,a.next_run active_next_run,a.source active_source,a.error active_error
+                 FROM bloggers b LEFT JOIN subscriptions s ON s.user=b.user
+                 LEFT JOIN tasks a ON a.id=(SELECT t.id FROM tasks t WHERE t.user=b.user AND t.post_id IS NULL
+                     AND t.status IN ('queued','running','retry')
+                     ORDER BY CASE t.status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,t.created,t.id LIMIT 1)'''
+        query_args = [*args, *order_args]
+        sql += clause + ' ORDER BY ' + ordering
+        if limit is not None:
+            sql += ' LIMIT ?'
+            query_args.append(max(1, limit))
+        rows = [dict(row) for row in db.execute(sql, query_args)]
+    for row in rows:
+        active = {key: row.pop('active_' + key) for key in ('id', 'status', 'next_run', 'source', 'error')}
+        row['active_task'] = active if active['id'] else None
+    return {'items': rows, 'total': total}
+
+
+def list_posts(store, q='', user='', post='', favorite=False, tag='', kind='', limit=30, offset=0,
+               order='timeline', seed='', snapshot=0):
+    q, user = q.strip()[:200], user.strip().removeprefix('@').lower()
+    where, args = [], []
+    if q:
+        condition, values = blogger_match(q)
+        where.append('''(instr(lower(content),?)>0 OR instr(lower(display_name),?)>0 OR instr(lower(user),?)>0
+                        OR instr(lower(tags),?)>0 OR instr(lower(note),?)>0
+                        OR user IN (SELECT b.user FROM bloggers b WHERE ''' + condition + '))')
+        args.extend([q.lower(), q.lower(), q.lower().removeprefix('@') or q.lower(), q.lower(), q.lower(), *values])
     for field, value in (('user', user), ('id', post)):
         if value:
             where.append(field + '=?')
@@ -125,4 +180,8 @@ def list_posts(store, q='', user='', post='', favorite=False, tag='', kind='', l
             grouped.setdefault(item['post_id'], []).append(item)
         for row in rows:
             row['media'] = grouped.get(row['id'], [])
-    return {'items': rows, 'total': total, 'snapshot': snapshot}
+    result = {'items': rows, 'total': total, 'snapshot': snapshot}
+    if q or user:
+        bloggers = list_bloggers(store, q=q, user=user, limit=20)
+        result.update(bloggers=bloggers['items'], blogger_total=bloggers['total'])
+    return result

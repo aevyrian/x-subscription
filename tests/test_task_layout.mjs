@@ -191,4 +191,56 @@ app.node('proxy').value='';app.node('clear-proxy').checked=true;app.calls.length
 await app.node('settings-form').onsubmit({preventDefault(){},submitter:{disabled:false}});
 assert.equal(app.calls.find(call=>call.method==='PUT').body.clear_proxy,true);
 
-console.log('X fixed task cards, filtering, refresh, detail, shared actions and immediate race-safe navigation passed.');
+const diagnostics=harness();
+const diagnosticTask={...fixture[1],user:'example',post_id:'123',url:'javascript:alert(1)'};
+diagnostics.context.diagnosticTask=diagnosticTask;
+for(const render of ['taskCard','taskDetails']){
+  const html=diagnostics.run(`${render}(diagnosticTask)`);
+  assert.match(html,/href="https:\/\/x\.com\/example\/status\/123"/);
+  assert.match(html,/target="_blank" rel="noopener noreferrer"/);
+  assert.doesNotMatch(html,/href="javascript:/);
+}
+diagnostics.run(`diagnosticTask.user='evil.test/path';diagnosticTask.post_id='bad'`);
+assert.doesNotMatch(diagnostics.run('taskCard(diagnosticTask)'),/href="https:\/\/x\.com/,'Invalid task identities must not create an X link');
+diagnostics.run(`taskItems=[{user:'nasa',id:'one',status:'failed'},{user:'nasa_news',id:'two',status:'failed'}];taskFilter='all';taskQuery='@nasa'`);
+assert.equal(diagnostics.run('filteredTasks().length'),1,'An @handle task filter must match the exact author');
+diagnostics.run(`taskCooldownUntil=Date.now()/1000+3600;later=Date.now()/1000+7200`);
+assert.match(diagnostics.run(`taskResult({status:'queued',next_run:0})`),/整个队列/);
+assert.equal(diagnostics.run(`taskResult({status:'retry',next_run:later}).includes(date(later))`),true,'A later task retry must not be shown before its own next_run');
+
+const unified=harness();
+unified.run(`summary={user:'example',display_name:'Example Summary',post_count:12,media_count:20,favorite_count:3,subscribed:true,enabled:true,schedule:'quarterly',next_run:1792890000,last_success_at:1792700000,last_post_at:'2026-10-23 12:00:00',active_task:null};
+  normalApi=api;api=(path,method='GET',body)=>{if(path.startsWith('/posts?')){calls.push({path,method,body});return Promise.resolve({items:[],total:0,snapshot:1,bloggers:[summary],blogger_total:1});}return normalApi(path,method,body);};`);
+for(const view of ['archive','favorites','bloggers','subscriptions','tasks','settings']){
+  unified.run(`state={view:'${view}',order:'timeline'};location.search='?view=${view}'`);unified.node('search').value='@example';
+  await unified.node('search-form').onsubmit({preventDefault(){}});
+  assert.equal(new URLSearchParams(unified.context.location.search).get('view'),null,'Every global search must open the shared archive results');
+  assert.equal(new URLSearchParams(unified.context.location.search).get('q'),'@example');
+  assert.match(unified.node('content').innerHTML,/Example Summary/);
+  assert.match(unified.node('content').innerHTML,/最近完整更新/);
+  assert.match(unified.node('content').innerHTML,/内容收录到/);
+  assert.match(unified.node('content').innerHTML,/每季度一次/);
+  assert.match(unified.node('content').innerHTML,/data-action="plan-user"/);
+}
+const searchRequests=unified.calls.filter(call=>call.path.startsWith('/posts?')).length;
+await unified.run(`action({dataset:{action:'download-user',user:'example'}})`);
+assert.equal(unified.calls.filter(call=>call.path.startsWith('/posts?')).length,searchRequests+1,'An update must refresh the matching author task status');
+await unified.run(`action({dataset:{action:'user-tasks',user:'example'}})`);
+assert.equal(unified.run('taskQuery'),'@example');
+assert.match(unified.calls.findLast(call=>call.path.startsWith('/tasks?')).path,/q=%40example/);
+unified.run(`summary.last_success_at=null;state={view:'archive',q:'example',offset:0}`);
+assert.match(await unified.run('renderArchive()'),/暂无记录/);
+unified.run(`summary.subscribed=false;summary.enabled=false;summary.schedule='quarterly'`);
+const pausedSummary=unified.run('searchBloggerCard(summary)');
+assert.match(pausedSummary,/每季度一次/);
+assert.match(pausedSummary,/已暂停/);
+assert.doesNotMatch(pausedSummary,/未设计划/,'A paused plan still has its saved frequency');
+unified.run(`summary.schedule='once'`);
+const onceSummary=unified.run('searchBloggerCard(summary)');
+assert.match(onceSummary,/仅下载这一次/);
+assert.match(onceSummary,/不自动更新/);
+assert.doesNotMatch(onceSummary,/未设计划/,'A once plan is present even though it is not automatically enabled');
+const draftSearch=harness();await draftSearch.run('route()');draftSearch.node('search').value='@draft';
+await draftSearch.intervals[0]();
+assert.equal(draftSearch.node('search').value,'@draft','Background task refresh must not erase an unsubmitted global search');
+console.log('Task cards, global author search, X diagnostics, queue cooldown, bulk actions and race-safe navigation passed.');

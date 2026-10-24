@@ -90,7 +90,7 @@ class PostEdit(Body):
 def create_app(data_dir=None, run_worker=True, runner=None):
     store = Store(data_dir or os.environ.get('XARCHIVE_DATA', 'data'))
     from .engine import Engine, parse_cookies
-    from .library import list_posts, safe_file
+    from .library import list_bloggers, list_posts, safe_file
     if runner is None and run_worker:
         runner = Engine(store)
     worker = Worker(store, runner)
@@ -315,10 +315,8 @@ def create_app(data_dir=None, run_worker=True, runner=None):
         return {'ok': True}
 
     @app.get('/api/v1/bloggers')
-    def bloggers(featured: bool = False, _=Depends(admin)):
-        return {'items': store.query('''SELECT b.*, (SELECT COUNT(*) FROM posts p WHERE p.user=b.user) post_count,
-                       COALESCE(s.enabled,0) subscribed,s.schedule FROM bloggers b LEFT JOIN subscriptions s ON s.user=b.user
-                       ''' + (' WHERE b.featured=1' if featured else '') + ' ORDER BY b.featured DESC,b.created DESC')}
+    def bloggers(featured: bool = False, q: str = Query(default='', max_length=200), user: str = '', _=Depends(admin)):
+        return list_bloggers(store, q=q, user=user, featured=featured)
 
     @app.patch('/api/v1/bloggers/{user}')
     def edit_blogger(user: str, body: BloggerEdit, _=Depends(admin)):
@@ -430,6 +428,9 @@ def create_app(data_dir=None, run_worker=True, runner=None):
                 values['x_proxy'] = proxy
             for key, value in values.items():
                 db.execute('INSERT INTO settings VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', (key, json.dumps(value)))
+            if cookies is not None:
+                db.execute("DELETE FROM settings WHERE key='x_rate_limit_until'")
+                db.execute("INSERT INTO settings VALUES ('x_cookie_revision','1') ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1")
         return {'ok': True}
 
     @app.get('/api/v1/posts')

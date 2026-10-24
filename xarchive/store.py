@@ -54,8 +54,13 @@ def task_selection(task_filter, q):
         raise ValueError('无效的任务筛选条件')
     where, args = [], []
     if q.strip():
-        where.append("instr(lower(user || ' ' || COALESCE(post_id,'') || ' ' || id),?)>0")
-        args.append(q.strip().lower())
+        query = q.strip().lower()
+        if re.fullmatch(r'@[a-z0-9_]{1,15}', query):
+            where.append('user=?')
+            args.append(query[1:])
+        else:
+            where.append("instr(lower(user || ' ' || COALESCE(post_id,'') || ' ' || id),?)>0")
+            args.append(query)
     statuses = TASK_FILTERS[task_filter]
     if statuses:
         where.append('status IN (' + ','.join('?' for _ in statuses) + ')')
@@ -169,6 +174,10 @@ class Store:
             for name, declaration in (('avatar_url', "TEXT NOT NULL DEFAULT ''"), ('featured', 'INTEGER NOT NULL DEFAULT 0')):
                 if name not in blogger_columns:
                     db.execute(f'ALTER TABLE bloggers ADD COLUMN {name} {declaration}')
+            if 'last_success_at' not in blogger_columns:
+                db.execute('ALTER TABLE bloggers ADD COLUMN last_success_at REAL')
+                db.execute("""UPDATE bloggers SET last_success_at=(SELECT MAX(t.finished) FROM tasks t
+                              WHERE t.user=bloggers.user AND t.post_id IS NULL AND t.status='succeeded')""")
             if not db.execute("SELECT 1 FROM settings WHERE key='all_downloads_v2'").fetchone():
                 db.execute("INSERT INTO settings VALUES ('all_downloads_v2','true')")
                 db.execute("INSERT INTO settings VALUES ('timeout_minutes','0') ON CONFLICT(key) DO UPDATE SET value='0'")
@@ -209,6 +218,16 @@ class Store:
     def set_setting(self, key, value):
         self.execute('INSERT INTO settings VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
                      (key, json.dumps(value)))
+
+    @staticmethod
+    def _cooldown_until(db):
+        row = db.execute("SELECT value FROM settings WHERE key='x_rate_limit_until'").fetchone()
+        return float(json.loads(row['value'])) if row else 0
+
+    @staticmethod
+    def _cookie_revision(db):
+        row = db.execute("SELECT value FROM settings WHERE key='x_cookie_revision'").fetchone()
+        return int(json.loads(row['value'])) if row else 0
 
     def add_blogger(self, user, db):
         db.execute('INSERT OR IGNORE INTO bloggers(user,created) VALUES (?,?)', (user, time.time()))
@@ -260,6 +279,8 @@ class Store:
             return 0
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
+            if self._cooldown_until(db) > now:
+                return 0
             self._spread_overdue(db, now)
             dispatch = db.execute("SELECT value FROM settings WHERE key IN ('scheduled_dispatch_after','scheduled_claim_after')").fetchall()
             if any(json.loads(row['value']) > now for row in dispatch):
@@ -300,6 +321,8 @@ class Store:
         now = time.time() if timestamp is None else timestamp
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
+            if self._cooldown_until(db) > now:
+                return None
             dispatch = db.execute("SELECT value FROM settings WHERE key='scheduled_claim_after'").fetchone()
             automatic_allowed = in_update_window(now) and (not dispatch or json.loads(dispatch['value']) <= now)
             row = db.execute("""SELECT * FROM tasks WHERE status IN ('queued','retry') AND next_run<=?
@@ -311,7 +334,9 @@ class Store:
             if row['source'] == 'scheduled':
                 db.execute("INSERT INTO settings VALUES ('scheduled_claim_after',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                            (json.dumps(now + random.randint(15, 30) * 60),))
-            return dict(db.execute('SELECT * FROM tasks WHERE id=?', (row['id'],)).fetchone())
+            task = dict(db.execute('SELECT * FROM tasks WHERE id=?', (row['id'],)).fetchone())
+            task['cookie_revision'] = self._cookie_revision(db)
+            return task
 
     def cancel(self, identifier):
         return self.execute("""UPDATE tasks SET status='cancelled',finished=?
@@ -354,7 +379,8 @@ class Store:
             items = [dict(row) for row in db.execute('''SELECT t.*,(SELECT COUNT(*) FROM posts p WHERE p.user=t.user) archive_posts
                                                        FROM tasks t''' + where + ' ORDER BY created DESC,id DESC LIMIT ? OFFSET ?',
                                                       [*args, max(1, min(limit, 200)), max(0, offset)])]
-            return {'items': items, 'total': counts[task_filter], 'counts': counts}
+            return {'items': items, 'total': counts[task_filter], 'counts': counts,
+                    'cooldown_until': self._cooldown_until(db)}
 
     def bulk_tasks(self, action, task_filter='all', q=''):
         if action not in ('cancel', 'retry', 'delete'):
@@ -376,19 +402,31 @@ class Store:
 
     def finish(self, task, result=None, error=None, retry_after=None):
         with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            now = time.time()
             if error:
                 limited = retry_after is not None
                 status = 'retry' if limited or task['attempts'] < task['max_attempts'] else 'failed'
                 delay = max(1, retry_after) if limited else 30 * 2 ** (task['attempts'] - 1)
-                due = time.time() + delay
+                current_cookie = self._cookie_revision(db)
+                same_account = task.get('cookie_revision', current_cookie) == current_cookie
+                if limited and not same_account:
+                    delay, error = 1, 'X 登录设置已更新，使用新设置重试'
+                due = now + delay
                 if task['source'] == 'scheduled':
                     due = next_work_window(due)
                 db.execute('''UPDATE tasks SET status=?,error=?,attempts=MAX(attempts-?,0),next_run=?,finished=?
                               WHERE id=? AND status='running' AND generation=? ''',
                            (status, error, int(limited), due,
-                            time.time(), task['id'], task['generation']))
+                            now, task['id'], task['generation']))
+                if limited and same_account:
+                    until = max(self._cooldown_until(db), now + delay)
+                    db.execute("INSERT INTO settings VALUES ('x_rate_limit_until',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                               (json.dumps(until),))
             else:
                 posts, media = result or (0, 0)
-                db.execute("""UPDATE tasks SET status='succeeded',new_posts=new_posts+?,
+                changed = db.execute("""UPDATE tasks SET status='succeeded',new_posts=new_posts+?,
                               new_media=new_media+?,finished=?,error=NULL WHERE id=? AND status='running' AND generation=?""",
-                           (posts, media, time.time(), task['id'], task['generation']))
+                           (posts, media, now, task['id'], task['generation'])).rowcount
+                if changed and task['post_id'] is None:
+                    db.execute('UPDATE bloggers SET last_success_at=? WHERE user=?', (now, task['user']))

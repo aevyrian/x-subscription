@@ -38,9 +38,13 @@ def parse_cookies(value):
     return result
 
 
+def rate_limited(text):
+    return bool(re.search(r'^\[twitter\]\[error\]\s+Rate limit exceeded(?:\s|$)', text, re.IGNORECASE | re.MULTILINE))
+
+
 def classify_error(text, code):
     text = text.lower()
-    if re.search(r'\b429\b|rate[ -]?limit', text):
+    if rate_limited(text):
         return 'X 请求限流，稍后自动重试'
     if any(x in text for x in ('401', '403', 'authentication', 'login', 'cookies', 'unauthorized', 'locked')):
         return 'X 登录失效或访问受限，请在设置中更新 Cookie'
@@ -61,6 +65,9 @@ class Engine:
             path.unlink(missing_ok=True)
 
     def config(self, task):
+        account = {row['key']: json.loads(row['value']) for row in self.store.query(
+            "SELECT key,value FROM settings WHERE key IN ('x_cookies','x_cookie_revision')")}
+        task['cookie_revision'] = account.get('x_cookie_revision', 0)
         return {
             'cache': {'file': str(self.store.config / 'gallery-cache.sqlite3')},
             'extractor': {
@@ -70,16 +77,16 @@ class Engine:
                 'proxy': self.store.setting('x_proxy'),
                 'retries': 2, 'timeout': 30,
                 'postprocessors': [{'name': 'metadata', 'event': 'post', 'filename': '{tweet_id}.json'}],
-                'twitter': {'cookies': self.store.setting('x_cookies', {}), 'text-tweets': True,
+                'twitter': {'cookies': account.get('x_cookies', {}), 'text-tweets': True,
                             'retweets': False, 'quoted': False, 'ratelimit': 'abort', 'retries-api': 2,
                             'videos': True, 'articles': False}},
             'output': {'mode': 'null', 'progress': False},
         }
 
     def __call__(self, task, interrupted, progress):
-        if not self.store.setting('x_cookies'):
-            raise DownloadError('尚未填写 X Cookie，请打开网站设置')
         settings = self.config(task)
+        if not settings['extractor']['twitter']['cookies']:
+            raise DownloadError('尚未填写 X Cookie，请打开网站设置')
         fd, filename = tempfile.mkstemp(prefix='.run-', suffix='.json', dir=self.store.config)
         process = reader = None
         lines, count, scanned = deque(maxlen=40), [0], [0]
@@ -141,7 +148,7 @@ class Engine:
             if interrupted():
                 raise Interrupted()
             output = ''.join(lines)
-            if re.search(r'\b429\b|rate[ -]?limit', output, re.IGNORECASE):
+            if rate_limited(output):
                 raise DownloadError('X 请求限流，15 分钟后自动重试', retry_after=900)
             if process.returncode:
                 raise DownloadError(classify_error(output, process.returncode))

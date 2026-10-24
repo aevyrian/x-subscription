@@ -12,7 +12,7 @@ class ConnectionPasswordTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             app = create_app(root, run_worker=False)
             with TestClient(app) as admin, TestClient(app) as script:
-                self.assertIn('/static/app.js?v=1.0.5', admin.get('/').text)
+                self.assertIn('/static/app.js?v=1.0.6', admin.get('/').text)
                 self.assertEqual(admin.get('/static/app.js').headers['cache-control'], 'no-cache')
                 admin.post('/api/v1/auth/setup', json={'password': 'test-admin-only'})
                 password = 'test-connection-only'
