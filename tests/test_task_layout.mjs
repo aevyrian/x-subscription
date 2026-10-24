@@ -17,7 +17,7 @@ function harness(saved, denied=false) {
   const node = id => {if(!nodes.has(id))nodes.set(id,element());return nodes.get(id);};
   const layouts = ['a','b'].map(layout=>element({layout}));
   const filters = ['all','active','attention','done'].map(filter=>element({filter}));
-  const sandbox = {console,URLSearchParams,Map,Set,Date,Number,String,Object,Math,
+  const sandbox = {console,URLSearchParams,Map,Set,Date,Number,String,Object,Math,AbortController,
     document:{hidden:false,getElementById:node,addEventListener(){},querySelector(){return null;},querySelectorAll(selector){return selector==='[data-action="task-layout"]'?layouts:selector==='[data-action="task-filter"]'?filters:[];}},
     localStorage:{getItem(key){if(denied)throw Error('unavailable');return values.get(key);},setItem(key,value){if(denied)throw Error('unavailable');values.set(key,value);}},
     location:{search:'?view=tasks'},history:{pushState(){}},window:{scrollY:0,innerHeight:1000,addEventListener(){},scrollTo(){}},
@@ -36,20 +36,46 @@ function harness(saved, denied=false) {
   return {run:code=>vm.runInContext(code,context),node,values,calls,intervals,context};
 }
 
-for(const [saved,expected] of [[undefined,'a'],['a','a'],['b','b'],['invalid','a']])
-  assert.equal(harness(saved).run('taskLayout'),expected);
-const blocked=harness('b',true);
-assert.equal(blocked.run('taskLayout'),'a');
-await blocked.run(`action({dataset:{action:'task-layout',layout:'b'}})`);
-assert.equal(blocked.run('taskLayout'),'b');
-assert.match(blocked.node('toast').textContent,/无法保存/);
-assert.equal(blocked.calls.length,0);
+// A slow previous request must not leave the old page visible or overwrite the new page's data.
+const navigation=harness();
+navigation.run(`state={view:'archive'};$('content').innerHTML='<video src="old.mp4"></video>';
+  pending=[];api=(path,method,body,signal)=>new Promise(resolve=>pending.push({path,signal,resolve}));
+  location.search='?view=settings';firstRoute=route();`);
+assert.doesNotMatch(navigation.node('content').innerHTML,/<video/,'Navigation must remove the old media immediately');
+assert.match(navigation.node('content').innerHTML,/role="status"/);
+navigation.run(`location.search='?view=tasks';secondRoute=route();`);
+assert.equal(navigation.run('pending[0].signal.aborted'),true,'The previous page request should be cancelled');
+navigation.run(`pending[1].resolve({items:fixture});`);
+await navigation.run('secondRoute');
+navigation.run(`pending[0].resolve({cookie_configured:true,default_schedule:'weekly'});`);
+await navigation.run('firstRoute');
+assert.match(navigation.node('content').innerHTML,/@nasa/);
+assert.equal(navigation.run('settings.cookie_configured'),undefined,'An obsolete settings response must not replace the current settings');
+
+navigation.run(`location.search='';archiveRoute=route();location.search='?view=bloggers';bloggerRoute=route();
+  pending[3].resolve({items:[{user:'current',display_name:'Current',post_count:1}]});`);
+await navigation.run('bloggerRoute');
+navigation.run(`pending[2].resolve({items:[{id:'old',media:[]}],total:999,snapshot:999});`);
+await navigation.run('archiveRoute');
+assert.equal(navigation.run('posts.has("old")'),false,'An obsolete archive response must not replace the active post map');
+assert.equal(navigation.run('rows.has("current")'),true);
+assert.notEqual(navigation.run('total'),999);
+navigation.run(`api=async()=>{throw Error('暂时离线')};location.search='?view=settings';failedRoute=route().catch(error=>error);`);
+await navigation.run('failedRoute');
+assert.match(navigation.node('content').innerHTML,/暂时无法读取设置/,'A failed page request must not remain a loading screen');
+assert.match(navigation.node('content').innerHTML,/暂时离线/);
+
+for(const saved of [undefined,'a','b','invalid']){
+  const fixed=harness(saved);fixed.run('renderTaskContent()');
+  assert.match(fixed.node('content').innerHTML,/class="task-card/);
+  assert.doesNotMatch(fixed.node('content').innerHTML,/class="task-queue/,'Old saved B must still display the original cards');
+}
+const blocked=harness('b',true);blocked.run('renderTaskContent()');
+assert.match(blocked.node('content').innerHTML,/class="task-card/);
+const markup=fs.readFileSync(new URL('../xarchive/static/index.html',import.meta.url),'utf8');
+assert.doesNotMatch(markup,/data-action="task-layout"/,'The layout selector is no longer part of the page');
 
 const app=harness();
-await app.run(`action({dataset:{action:'task-layout',layout:'b'}})`);
-assert.equal(app.values.get('shicun.downloadLayout'),'b');
-assert.equal(app.calls.length,0,'Changing layout must never submit or alter a task');
-assert.equal(harness(app.values.get('shicun.downloadLayout')).run('taskLayout'),'b');
 await app.run(`action({dataset:{action:'task-filter',filter:'attention'}})`);
 assert.equal(app.run('selectedTask'),'failed-id');
 assert.match(app.node('content').innerHTML,/@chengstudio/);
@@ -106,4 +132,4 @@ app.node('proxy').value='';app.node('clear-proxy').checked=true;app.calls.length
 await app.node('settings-form').onsubmit({preventDefault(){},submitter:{disabled:false}});
 assert.equal(app.calls.find(call=>call.method==='PUT').body.clear_proxy,true);
 
-console.log('X task layouts: persistence, storage failure, filtering, refresh, mobile detail and shared API actions passed.');
+console.log('X fixed task cards, filtering, refresh, detail, shared actions and immediate race-safe navigation passed.');

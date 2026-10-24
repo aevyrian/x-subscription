@@ -11,15 +11,14 @@ const feedOrders={random:'随机浏览',timeline:'时间：新到旧',oldest:'�
 const labels={archive:'首页',favorites:'书签',bloggers:'博主',subscriptions:'计划',tasks:'下载',settings:'设置'};
 const cadence={monthly:'每月一次',weekly:'每周一次',daily:'每天一次',once:'仅下载这一次'};
 const statuses={queued:'排队中',running:'正在下载',retry:'等待重试',succeeded:'已完成',failed:'失败',cancelled:'已取消'};
-let state={},settings={},posts=new Map(),rows=new Map(),editSave,setupRequired=false,toastTimer,renderSequence=0,total=0;
-let taskLayout='a',taskItems=[],taskFilter='all',taskQuery='',selectedTask='',taskLoadError='';
-try{if(localStorage.getItem('shicun.downloadLayout')==='b')taskLayout='b';}catch{}
+let state={},settings={},posts=new Map(),rows=new Map(),editSave,setupRequired=false,toastTimer,renderSequence=0,total=0,routeController;
+let taskItems=[],taskFilter='all',taskQuery='',selectedTask='',taskLoadError='';
 const date=v=>v?new Date(typeof v==='number'?v*1000:v.replace(' ','T')).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'—';
 const scheduleOptions=(value='monthly')=>Object.entries(cadence).map(([k,v])=>`<option value="${k}" ${value===k?'selected':''}>${v}</option>`).join('');
 function toast(message){$('toast').textContent=message;$('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').hidden=true,4500);}
-function handleError(error){toast(error.message||'暂时无法连接服务');}
-async function api(path,method='GET',body){
-  const response=await fetch('/api/v1'+path,{method,credentials:'same-origin',headers:body===undefined?{}:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
+function handleError(error){if(error.name!=='AbortError')toast(error.message||'暂时无法连接服务');}
+async function api(path,method='GET',body,signal){
+  const response=await fetch('/api/v1'+path,{method,credentials:'same-origin',signal,headers:body===undefined?{}:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
   const data=await response.json();
   if(!response.ok){if(response.status===401&&!path.startsWith('/auth'))showAuth(false);throw Error(data.error||'请求未成功');}
   return data;
@@ -39,9 +38,12 @@ function readRoute(){const p=new URLSearchParams(location.search),view=p.get('vi
 function navigate(view,values={}){const p=new URLSearchParams();if(view!=='archive')p.set('view',view);for(const[k,v]of Object.entries(values))if(v)p.set(k,String(v));history.pushState(null,'','/'+(p.size?'?'+p:''));route().catch(handleError);window.scrollTo(0,0);}
 function filters(){return {q:$('search').value.trim(),kind:state.kind,user:state.user,post:state.post,tag:state.tag,order:state.order};}
 async function route(){
-  state=readRoute();const sequence=++renderSequence,archive=['archive','favorites'].includes(state.view);
+  const next=readRoute(),changingView=next.view!==state.view||next.section!==state.section;
+  routeController?.abort();routeController=new AbortController();const signal=routeController.signal;
+  state=next;const sequence=++renderSequence,archive=['archive','favorites'].includes(state.view);
+  if(changingView)$('content').innerHTML='<p class="section-note" role="status">正在读取'+labels[state.view]+'…</p>';
   $('shell').classList.toggle('archive-view',archive);$('content').classList.toggle('archive-feed',archive);$('shell').classList.toggle('settings-view',state.view==='settings');$('page-title').textContent=labels[state.view];
-  $('shell').classList.toggle('tasks-view',state.view==='tasks');$('shell').classList.toggle('tasks-layout-b',state.view==='tasks'&&taskLayout==='b');$('task-controls').hidden=state.view!=='tasks';
+  $('shell').classList.toggle('tasks-view',state.view==='tasks');$('task-controls').hidden=state.view!=='tasks';
   if(state.view!=='tasks')$('task-dialog').close();
   document.querySelectorAll('[data-nav]').forEach(b=>b.classList.toggle('active',b.dataset.nav===state.view));
   $('archive-filters').hidden=!archive;$('pagination').hidden=true;$('filter-context').hidden=true;
@@ -50,7 +52,8 @@ async function route(){
   const clear=state.user||state.post||state.tag||state.q||state.kind;$('clear-filters').hidden=!clear;
   const context=[state.user&&'@'+state.user,state.post&&'单条帖子',state.tag&&'#'+state.tag,state.q&&'搜索：'+state.q].filter(Boolean).join(' · ');$('filter-context').hidden=!archive||!context;$('filter-context').textContent=context;
   let html;
-  if(archive)html=await renderArchive();else if(state.view==='tasks')html=await renderTasks(sequence);else if(state.view==='bloggers')html=await renderBloggers();else if(state.view==='subscriptions')html=await renderSubscriptions();else html=await renderSettings();
+  try{if(archive)html=await renderArchive(sequence,signal);else if(state.view==='tasks')html=await renderTasks(sequence,signal);else if(state.view==='bloggers')html=await renderBloggers(sequence,signal);else if(state.view==='subscriptions')html=await renderSubscriptions(sequence,signal);else html=await renderSettings(sequence,signal);}
+  catch(error){if(sequence!==renderSequence||error.name==='AbortError')return;$('content').innerHTML=empty('暂时无法读取'+labels[state.view],error.message||'请稍后刷新重试。');throw error;}
   if(sequence!==renderSequence)return;
   $('content').innerHTML=html;
   if(archive)pagination(total,30);if(state.view==='tasks')pagination(total,50);if(state.view==='settings')bindSettings();
@@ -62,7 +65,7 @@ function postCard(p){
   const media=p.media.slice(0,4),count=media.length;
   return `<article class="post-card"><div class="post-author"><a class="post-avatar" href="${esc(p.url)}" target="_blank" rel="noopener noreferrer" aria-label="在 X 打开这条帖子">${avatar(p.user,p.display_name)}</a><div class="post-identity"><button class="author-name" data-action="user" data-user="${esc(p.user)}">${esc(p.display_name||p.user)}</button><span class="author-meta">@${esc(p.user)} · ${esc(date(p.posted_at||p.added))}</span></div><button class="post-menu icon-button" data-action="share" data-id="${p.id}" aria-label="分享帖子">${icon('more')}</button></div><p class="post-text">${esc(p.content)}</p>${count?`<div class="media-grid count-${count}">${media.map((m,i)=>m.kind==='video'?`<div class="media-tile">${mediaHTML(m)}<button class="expand-video" data-action="detail" data-id="${p.id}" data-index="${i}" aria-label="全屏查看视频">${icon('external')}</button></div>`:`<button class="media-tile" data-action="detail" data-id="${p.id}" data-index="${i}" aria-label="查看图片 ${i+1}">${mediaHTML(m)}${i===3&&p.media.length>4?`<span class="media-overflow">＋${p.media.length-4}</span>`:''}</button>`).join('')}</div>`:''}${tagsHTML(p)}${p.note?`<p class="post-note">${esc(p.note)}</p>`:''}<div class="post-footer"><button data-action="edit-post" data-id="${p.id}" aria-label="编辑标签和备注">${icon('comment')}<span>备注</span></button><button class="${p.favorite?'selected':''}" data-action="favorite" data-id="${p.id}" aria-label="${p.favorite?'取消收藏':'收藏'}" aria-pressed="${!!p.favorite}">${icon('bookmark')}<span>${p.favorite?'已收藏':'收藏'}</span></button><button data-action="detail" data-id="${p.id}" ${!p.media.length?'disabled':''}>${icon('image')}<span>${p.media.length} 份媒体</span></button><a href="${esc(p.url)}" target="_blank" rel="noopener noreferrer" aria-label="打开原帖">${icon('external')}</a></div></article>`;
 }
-async function renderArchive(){const p=new URLSearchParams({...state,favorite:state.view==='favorites',limit:30,seed:feedSeed,snapshot:feedSnapshot});p.delete('view');p.delete('section');const data=await api('/posts?'+p);feedSnapshot=data.snapshot;posts=new Map(data.items.map(p=>[p.id,p]));total=data.total;if(!data.items.length)return empty(state.view==='favorites'?'你的书签，从这里开始':'这里还没有帖子',state.q||state.user||state.tag||state.post?'没有找到符合条件的内容，试试清除筛选。':'添加一位博主，或保存一条喜欢的帖子。',true);return data.items.map(postCard).join('');}
+async function renderArchive(sequence=renderSequence,signal){const p=new URLSearchParams({...state,favorite:state.view==='favorites',limit:30,seed:feedSeed,snapshot:feedSnapshot});p.delete('view');p.delete('section');const data=await api('/posts?'+p,'GET',undefined,signal);if(sequence!==renderSequence)return '';feedSnapshot=data.snapshot;posts=new Map(data.items.map(p=>[p.id,p]));total=data.total;if(!data.items.length)return empty(state.view==='favorites'?'你的书签，从这里开始':'这里还没有帖子',state.q||state.user||state.tag||state.post?'没有找到符合条件的内容，试试清除筛选。':'添加一位博主，或保存一条喜欢的帖子。',true);return data.items.map(postCard).join('');}
 const taskActive=r=>['queued','running','retry'].includes(r.status);
 function filteredTasks(){const query=taskQuery.trim().toLowerCase();return taskItems.filter(r=>(taskFilter==='all'||taskFilter==='active'&&taskActive(r)||taskFilter==='attention'&&['failed','retry'].includes(r.status)||taskFilter==='done'&&r.status==='succeeded')&&`${r.user} ${r.post_id||''} ${r.id}`.toLowerCase().includes(query));}
 function selectedTaskId(items,id){return items.some(r=>r.id===id)?id:items[0]?.id||'';}
@@ -71,11 +74,9 @@ function taskBadge(r){return `<span class="badge ${esc(r.status)}">${esc(statuse
 function taskActions(r){return `<button data-action="user" data-user="${esc(r.user)}">查看归档</button>${taskActive(r)?`<button class="quiet" data-action="cancel" data-id="${esc(r.id)}">取消</button>`:['failed','cancelled'].includes(r.status)?`<button class="task-retry" data-action="retry" data-id="${esc(r.id)}">${icon('refresh')}重试</button>`:`<button class="quiet" data-action="download-task" data-id="${esc(r.id)}">再次检查</button>`}`;}
 function taskDetails(r){return `<div class="task-detail-identity">${avatar(r.user)}<div><h3>@${esc(r.user)}</h3><span class="muted small">${r.post_id?'单条帖子':'博主 · 全部可读取的帖子'}</span></div></div><div class="task-detail-result">${taskBadge(r)}<p>${esc(taskResult(r))}</p>${r.error?`<p class="error">${esc(r.error)}</p>`:''}</div><dl class="task-detail-fields"><dt>添加时间</dt><dd>${date(r.created)}</dd><dt>开始时间</dt><dd>${r.started?date(r.started):'尚未开始'}</dd><dt>尝试次数</dt><dd>${r.attempts} 次</dd>${r.status==='retry'?`<dt>下次重试</dt><dd>${date(r.next_run)}</dd>`:''}${r.post_id?`<dt>帖子 ID</dt><dd>${esc(r.post_id)}</dd>`:''}<dt>已有归档</dt><dd>${r.archive_posts} 篇帖子</dd><dt>任务编号</dt><dd class="task-id">${esc(r.id)}</dd></dl><div class="actions">${taskActions(r)}</div><p class="task-detail-note">已保存的文件会自动跳过；取消本次任务不会移除更新计划。</p>`;}
 function taskCard(r){return `<article class="task-card ${esc(r.status)}"><span class="avatar task-icon">${icon('download')}</span><div class="task-info"><div class="task-header"><strong>@${esc(r.user)}</strong>${taskBadge(r)}</div><div class="task-meta">${r.post_id?'单条帖子':'全部帖子'} · ${date(r.created)}${r.attempts>1?' · 第 '+r.attempts+' 次尝试':''}</div><p class="task-result">${esc(taskResult(r))}</p>${r.error?`<p class="error">${esc(r.error)}</p>`:''}<div class="task-card-bottom"><span class="task-meta">已有 ${r.archive_posts} 篇归档</span><div class="actions"><button class="text-button" data-action="task-select" data-id="${esc(r.id)}">查看详情</button>${taskActions(r)}</div></div></div></article>`;}
-function taskQueueRow(r){return `<button class="task-queue-row ${selectedTask===r.id?'selected':''}" data-action="task-select" data-id="${esc(r.id)}" aria-pressed="${selectedTask===r.id}"><span class="task-queue-person">${avatar(r.user)}<span><strong>@${esc(r.user)}</strong><small>${r.post_id?'单条帖子':'全部帖子'}</small></span></span>${taskBadge(r)}<span class="task-queue-result ${r.status==='failed'?'error':''}">${esc(r.error||taskResult(r))}</span><time>${date(r.created)}</time>${icon('chevron')}</button>`;}
 function currentTaskPanel(){const r=taskItems.find(r=>r.status==='running');if(!r)return `<aside class="task-current-panel"><h2>本页正在保存</h2><p class="muted small">本页没有正在下载的任务。</p><p class="task-detail-note">单条帖子保存原文和媒体；博主任务保存全部可读取的内容。</p></aside>`;return `<aside class="task-current-panel"><h2>本页正在保存</h2><div class="task-detail-identity">${avatar(r.user)}<div><h3>@${esc(r.user)}</h3><span class="muted small">全部可读取的内容</span></div></div><div class="task-progress-counts"><div><strong>${r.scanned_posts||0}</strong><span>已读取帖子</span></div><div><strong>${r.progress||0}</strong><span>已保存媒体</span></div></div><p class="task-detail-note">长任务会持续更新归档，已保存的文件自动跳过。</p><button class="text-button" data-action="user" data-user="${esc(r.user)}">查看此博主归档</button></aside>`;}
 function updateTaskControls(){
-  const items=filteredTasks();selectedTask=selectedTaskId(items,selectedTask);$('shell').classList.toggle('tasks-layout-b',state.view==='tasks'&&taskLayout==='b');$('page-title').textContent=taskLayout==='b'?'下载工作台':'下载任务';
-  document.querySelectorAll('[data-action="task-layout"]').forEach(b=>{b.classList.toggle('active',b.dataset.layout===taskLayout);b.setAttribute('aria-pressed',String(b.dataset.layout===taskLayout));});
+  const items=filteredTasks();selectedTask=selectedTaskId(items,selectedTask);$('page-title').textContent='下载任务';
   const counts={all:taskItems.length,active:taskItems.filter(taskActive).length,attention:taskItems.filter(r=>['failed','retry'].includes(r.status)).length,done:taskItems.filter(r=>r.status==='succeeded').length},labels={all:'全部',active:'进行中',attention:'需关注',done:'已完成'};
   document.querySelectorAll('[data-action="task-filter"]').forEach(b=>{b.classList.toggle('active',b.dataset.filter===taskFilter);b.setAttribute('aria-pressed',String(b.dataset.filter===taskFilter));b.innerHTML=`${labels[b.dataset.filter]} <span>${counts[b.dataset.filter]}</span>`;});
   $('task-summary').innerHTML=Object.entries(counts).map(([key,count])=>`<div><strong>${taskLoadError?'—':count}</strong><span>本页${labels[key]}</span></div>`).join('');
@@ -85,39 +86,37 @@ function updateTaskControls(){
 function taskPage(){
   if(taskLoadError)return `<div class="task-message" role="alert"><h2>暂时无法读取任务</h2><p class="error">${esc(taskLoadError)}</p><button data-action="task-refresh">重新加载</button></div>`;
   if(!taskItems.length)return empty('把喜欢的内容留下来','添加一条帖子或博主，这里会显示下载进度。',true);
-  const items=filteredTasks(),selected=items.find(r=>r.id===selectedTask);
+  const items=filteredTasks();
   const blank=`<div class="task-message"><h2>本页没有匹配任务</h2><p class="muted">换一个名称，或清除筛选后查看其他分页。</p><button data-action="task-clear">清除筛选</button></div>`;
-  if(taskLayout==='a')return `<div class="task-layout-content"><section>${items.length?items.map(taskCard).join(''):blank}</section>${currentTaskPanel()}</div>`;
-  const running=taskItems.find(r=>r.status==='running');
-  return `${running?`<section class="task-now"><div>${icon('download')}<div><strong>正在保存 @${esc(running.user)}</strong><p>${esc(taskResult(running))}</p></div></div><button data-action="task-select" data-id="${esc(running.id)}">查看任务</button></section>`:''}<div class="task-layout-content"><section class="task-queue"><div class="task-queue-heading"><span>任务 / 对象</span><span>状态</span><span class="task-result-column">进度或结果</span><span class="task-time-column">添加时间</span><span></span></div>${items.length?items.map(taskQueueRow).join(''):blank}</section><aside class="task-inspector"><h2>任务详情</h2>${selected?taskDetails(selected):'<p class="muted small">选择一个任务，查看进度、结果与操作。</p>'}</aside></div>`;
+  return `<div class="task-layout-content"><section>${items.length?items.map(taskCard).join(''):blank}</section>${currentTaskPanel()}</div>`;
 }
 function renderTaskContent(){if(state.view!=='tasks')return;updateTaskControls();$('content').innerHTML=taskPage();}
-async function renderTasks(sequence){
+async function renderTasks(sequence,signal){
   const offset=state.offset;if(!taskItems.length)$('content').innerHTML='<p class="section-note" role="status">正在读取下载任务…</p>';
-  try{const data=await api('/tasks?limit=51&offset='+offset);if(sequence!==renderSequence)return '';taskItems=data.items.slice(0,50);taskLoadError='';total=offset+data.items.length;rows=new Map(taskItems.map(r=>[r.id,r]));}
+  try{const data=await api('/tasks?limit=51&offset='+offset,'GET',undefined,signal);if(sequence!==renderSequence)return '';taskItems=data.items.slice(0,50);taskLoadError='';total=offset+data.items.length;rows=new Map(taskItems.map(r=>[r.id,r]));}
   catch(error){if(sequence!==renderSequence)return '';taskItems=[];selectedTask='';taskLoadError=error.message||'请求未成功';total=offset;}
   updateTaskControls();return taskPage();
 }
-async function renderBloggers(){
-  const data=await api('/bloggers'+(state.featured?'?featured=true':''));rows=new Map(data.items.map(b=>[b.user,b]));
+async function renderBloggers(sequence=renderSequence,signal){
+  const data=await api('/bloggers'+(state.featured?'?featured=true':''),'GET',undefined,signal);if(sequence!==renderSequence)return '';rows=new Map(data.items.map(b=>[b.user,b]));
   const tabs=`<div class="feed-tabs"><button data-action="all-bloggers" class="${!state.featured?'active':''}">全部博主</button><button data-action="pick-featured" class="${state.featured?'active':''}">精选博主</button></div>`;
   if(!data.items.length)return tabs+empty(state.featured?'把喜欢的博主放在前面':'你的博主',state.featured?'在全部博主中点亮星标，下次就能快速找到。':'添加博主后会保存全部内容。',!state.featured);
   return tabs+data.items.map(b=>`<article class="person-row">${avatar(b.user,b.display_name)}<div class="person-info"><div class="person-header"><h3>${esc(b.display_name||b.user)}</h3><button class="star-button icon-button ${b.featured?'selected':''}" data-action="feature-blogger" data-user="${esc(b.user)}" aria-label="${b.featured?'取消精选':'设为精选'} ${esc(b.user)}" aria-pressed="${!!b.featured}">${icon('star')}</button></div><span class="muted small">@${esc(b.user)} · ${b.post_count} 篇帖子</span>${b.note?`<p>${esc(b.note)}</p>`:''}<div class="actions"><button data-action="user" data-user="${esc(b.user)}">查看帖子</button><button class="quiet" data-action="download-user" data-user="${esc(b.user)}">立即更新</button><button class="quiet" data-action="plan-user" data-user="${esc(b.user)}">${b.schedule?cadence[b.schedule]:'设置更新'}</button><button class="quiet" data-action="edit-blogger" data-user="${esc(b.user)}">编辑</button></div></div></article>`).join('');
 }
-async function renderSubscriptions(){
-  const data=await api('/subscriptions');rows=new Map(data.items.map(s=>[s.user,s]));
+async function renderSubscriptions(sequence=renderSequence,signal){
+  const data=await api('/subscriptions','GET',undefined,signal);if(sequence!==renderSequence)return '';rows=new Map(data.items.map(s=>[s.user,s]));
   if(!data.items.length)return empty('按照你的节奏','默认每月更新一次，也可以选择每天、每周或仅下载一次。',true);
   const selected=data.items.filter(s=>!state.featured||s.featured).sort((a,b)=>(state.plan_order==='featured'?b.featured-a.featured:0)||(state.plan_order==='name'?a.display_name.localeCompare(b.display_name,'zh-CN'):Number(!a.enabled)-Number(!b.enabled)||a.next_run-b.next_run)||a.user.localeCompare(b.user));
   const toolbar=`<div class="plan-toolbar"><label class="check-label"><input id="plan-featured" type="checkbox" ${state.featured?'checked':''}>只看星标 <span class="muted">${selected.length}</span></label><select id="plan-order" class="inline-select" aria-label="计划排序"><option value="featured" ${state.plan_order==='featured'?'selected':''}>星标优先</option><option value="next" ${state.plan_order==='next'?'selected':''}>下次更新时间</option><option value="name" ${state.plan_order==='name'?'selected':''}>博主名称</option></select></div>`;
   const plans=selected.map(s=>`<article class="plan-row" data-plan-user="${esc(s.user)}"><div class="plan-avatar">${avatar(s.user,s.display_name)}<button class="star-button icon-button ${s.featured?'selected':''}" data-action="feature-blogger" data-user="${esc(s.user)}" aria-label="${s.featured?'取消星标':'设为星标'} ${esc(s.user)}" aria-pressed="${!!s.featured}">${icon('star')}</button></div><div class="plan-info"><div class="plan-header"><div><h3>${esc(s.display_name)}</h3><small class="muted">@${esc(s.user)}</small></div><select class="inline-select" data-plan="${esc(s.user)}" aria-label="${esc(s.user)} 更新频率">${scheduleOptions(s.schedule)}</select></div><p>${s.schedule==='once'?'不再自动更新':s.enabled?'下次更新：'+date(s.next_run):'自动更新已暂停'}</p><div class="actions"><button data-action="download-user" data-user="${esc(s.user)}">立即更新</button><button class="quiet" data-action="user" data-user="${esc(s.user)}">查看帖子</button><button class="quiet danger" data-action="delete-sub" data-user="${esc(s.user)}">移除计划</button></div></div></article>`).join('');
   return toolbar+(plans||empty('还没有星标计划','点亮博主头像旁的星号，就可以在这里单独查看。'))+'<p class="section-note">首次保存全部内容，之后按计划更新。星标与博主精选共用；切换为「仅下载这一次」会停止后续自动更新。</p>';
 }
-async function renderSettings(){
-  settings=await api('/settings');const sections={account:'你的账号',updates:'下载与更新',connections:'连接与扩展',about:'关于拾存'},section=sections[state.section]?state.section:'account';let body='';
+async function renderSettings(sequence=renderSequence,signal){
+  const data=await api('/settings','GET',undefined,signal);if(sequence!==renderSequence)return '';settings=data;const sections={account:'你的账号',updates:'下载与更新',connections:'连接与扩展',about:'关于拾存'},section=sections[state.section]?state.section:'account';let body='';
   if(section==='account')body=`<div class="settings-heading"><h2>X 登录状态</h2><p>使用 X 的登录 Cookie 访问你有权限查看的帖子。</p></div><div class="settings-body"><div class="setting-status">${icon(settings.cookie_configured?'check':'close')}${settings.cookie_configured?'已保存 X Cookie':'尚未连接 X'}</div><form id="settings-form"><label>X Cookie<textarea id="cookies" autocomplete="off" spellcheck="false" placeholder="auth_token=…; ct0=…\n或粘贴 cookies.txt 的完整内容"></textarea></label><p class="muted">已保存的 Cookie 不会回显。留空可保留当前登录信息。</p><label class="check-label"><input id="clear-cookies" type="checkbox">清除当前 Cookie</label><button class="primary" type="submit">保存</button></form></div>`;
   if(section==='updates')body=`<div class="settings-heading"><h2>下载与更新</h2><p>保存完整内容，只选择适合你的更新节奏。</p></div><div class="settings-row"><span>下载范围</span><span class="muted">全部可读取的内容</span></div><div class="settings-body"><form id="settings-form"><label>新添加博主的默认更新频率<select id="default-schedule">${scheduleOptions(settings.default_schedule)}</select></label><p class="muted">每月更新按日历计算。你可以在「计划」中单独修改每位博主的频率。</p><label>下载代理（HTTP / HTTPS）<input id="proxy" type="password" maxlength="2048" autocomplete="off" placeholder="http://代理地址:端口"></label><p class="muted">${settings.proxy_configured?'已配置代理，留空保留；地址和凭据不会回显。':'未配置代理，留空直接连接。'}</p><label class="check-label"><input id="clear-proxy" type="checkbox">清除当前代理</label><button class="primary" type="submit">保存</button></form></div>`;
   if(section==='connections'){
-    const clients=await api('/clients');
+    const clients=await api('/clients','GET',undefined,signal);if(sequence!==renderSequence)return '';
     body=`<div class="settings-heading"><h2>连接与扩展</h2><p>在 X 页面直接保存帖子、添加博主或打开归档。</p></div><div class="settings-body"><div class="setting-status">${icon(settings.connection_password_configured?'check':'close')}${settings.connection_password_configured?'已设置连接密码':'请先设置连接密码'}</div><form id="connection-password-form"><label>${settings.connection_password_configured?'修改连接密码':'连接密码'}<input id="connection-password" type="password" minlength="8" maxlength="256" autocomplete="new-password" placeholder="由你设置，至少 8 个字符" required></label><label>再输入一次<input id="connection-password-confirm" type="password" minlength="8" maxlength="256" autocomplete="new-password" required></label><p class="muted">所有浏览器使用你设置的同一个连接密码。修改后，需要在脚本里重新填写。X Cookie 始终保留在服务端。</p><button class="primary" type="submit">保存连接密码</button></form><div class="connection"><h3>在其他浏览器使用</h3><p><a href="/integrations/xarchive.user.js" target="_blank" rel="noopener">安装 / 更新脚本猫脚本 ↗</a></p><label>归档网站地址<input value="${esc(location.origin)}" readonly aria-label="归档网站地址"></label><p class="muted">安装后刷新 X 页面，点击 Grok 上方的下载图标。在「连接设置」填写本站地址和你设置的连接密码，点击「验证并保存」；验证通过才会显示已连接。</p></div>${clients.items.length?`<details class="connection"><summary>旧版连接管理（${clients.items.length}）</summary><p class="muted">已配置的旧连接继续可用，不需要重新安装。</p>${clients.items.map(c=>`<div class="client-row"><div>${esc(c.name)}<small>${date(c.created)}</small></div><button class="danger" data-action="revoke-client" data-id="${c.id}">撤销</button></div>`).join('')}</details>`:''}</div>`;
   }
   if(section==='about')body=`<div class="settings-heading"><h2>拾存</h2><p>喜欢的，留下来。</p></div><div class="settings-row"><span>下载引擎</span><span class="muted">gallery-dl ${esc(settings.engine_version)}</span></div><div class="settings-body"><p>帖子、图片和视频保存在自己的存储中；收藏、标签和备注也会一直保留。</p><p class="muted">数据位置</p><div class="data-path">${esc(settings.data_dir)}</div><p class="muted">${settings.legacy_attached?'旧媒体通过只读卷接入。备份时同时保留旧媒体目录和新版数据目录；计划与登录设置保存在新版数据中。':'备份整个数据目录可同时保留归档、计划和登录设置。'}</p></div>`;
@@ -145,11 +144,10 @@ function showAdd(){$('intake-schedule').value=settings.default_schedule||'monthl
 function updateIntake(){const post=/\/status\/\d+/.test($('intake-url').value);$('intake-schedule-label').hidden=post;$('intake-hint').textContent=post?'保存这条帖子的原文和全部媒体。':'首次下载全部可读取的内容，之后按计划更新。已经保存的文件会自动跳过。';}
 async function action(button){
   const{action:a,id,user,tag}=button.dataset;
-  if(a==='task-layout'){if(!['a','b'].includes(button.dataset.layout))return;taskLayout=button.dataset.layout;try{localStorage.setItem('shicun.downloadLayout',taskLayout);}catch{toast('已切换布局；本浏览器暂时无法保存偏好。');}renderTaskContent();return;}
   if(a==='task-filter'){if(!['all','active','attention','done'].includes(button.dataset.filter))return;taskFilter=button.dataset.filter;renderTaskContent();return;}
   if(a==='task-clear'){taskFilter='all';taskQuery='';renderTaskContent();return;}
   if(a==='task-refresh')return route();
-  if(a==='task-select'){const task=taskItems.find(r=>r.id===id);if(!task)return;if(!filteredTasks().some(r=>r.id===id)){taskFilter='all';taskQuery='';}selectedTask=id;renderTaskContent();if(taskLayout==='a'||matchMedia('(max-width:900px)').matches){$('task-dialog-content').innerHTML=taskDetails(task);$('task-dialog').showModal();}return;}
+  if(a==='task-select'){const task=taskItems.find(r=>r.id===id);if(!task)return;if(!filteredTasks().some(r=>r.id===id)){taskFilter='all';taskQuery='';}selectedTask=id;renderTaskContent();$('task-dialog-content').innerHTML=taskDetails(task);$('task-dialog').showModal();return;}
   if(a==='add')return showAdd();
   if(a==='share')return showShare(id);
   if(a==='share-original')return copyLink(posts.get(id).url);
