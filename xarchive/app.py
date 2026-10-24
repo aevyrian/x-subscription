@@ -85,7 +85,7 @@ def create_app(data_dir=None, run_worker=True, runner=None):
         runner = Engine(store)
     worker = Worker(store, runner)
     login_lock = threading.Lock()
-    failures = []
+    failures = {}
     connection_lock = threading.Lock()
     connection_failures = {}
     public_origin = share_origin()
@@ -128,6 +128,14 @@ def create_app(data_dir=None, run_worker=True, runner=None):
             # Bearer credentials are explicit, not ambient browser cookies; GM requests may carry X's Origin.
             if origin and origin != expected and not request.headers.get('authorization', '').startswith('Bearer '):
                 return JSONResponse({'error': '不接受跨站网页请求；浮窗请使用连接凭据'}, status_code=403)
+            chunks, size = [], 0
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > 131072:
+                    return JSONResponse({'error': '请求过大'}, status_code=413)
+                chunks.append(chunk)
+            # Starlette's middleware replays _body after the request stream has been consumed.
+            request._body = b''.join(chunks)
         response = await call_next(request)
         response.headers['X-Content-Type-Options'] = 'nosniff'
         response.headers['Referrer-Policy'] = 'same-origin'
@@ -222,14 +230,15 @@ def create_app(data_dir=None, run_worker=True, runner=None):
     def login(body: Password, request: Request, response: Response):
         with login_lock:
             now = time.time()
-            failures[:] = [t for t in failures if t > now - 300]
-            if len(failures) >= 10:
+            address = request.client.host if request.client else ''
+            recent = [t for t in failures.get(address, []) if t > now - 300]
+            if len(recent) >= 10:
                 raise HTTPException(429, '登录尝试过多，请 5 分钟后再试')
             value = store.setting('admin')
             if not value or not hmac.compare_digest(password_hash(body.password.get_secret_value(), value['salt']), value['hash']):
-                failures.append(now)
+                failures[address] = recent + [now]
                 raise HTTPException(401, '密码不正确')
-            failures.clear()
+            failures.pop(address, None)
         session(response, request)
         return {'ok': True}
 

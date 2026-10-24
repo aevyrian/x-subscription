@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         拾存 · X 下载与归档
 // @namespace    xarchive.personal
-// @version      1.4.2
+// @version      1.4.3
 // @description  下载帖子、推送博主、订阅更新，并打开自己的归档。
 // @match        https://x.com/*
 // @match        https://www.x.com/*
@@ -135,6 +135,13 @@
   }
   function showActions() {$('actions-view').hidden = false; $('settings-view').hidden = true; $('settings').textContent = '连接设置'; update();}
   function configured() {if (base && token && connectionState === 'connected') return true; showSettings(); $('status').textContent = '请填写归档网站地址和连接密码，并点击验证。'; return false;}
+  function serverOrigin(value) {
+    let url;
+    try {url = new URL(value);} catch {throw Error('请填写归档网站的 HTTPS 根地址。');}
+    if (!['http:','https:'].includes(url.protocol) || url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw Error('请填写归档网站的 HTTPS 根地址。');
+    if (url.protocol === 'http:' && !['localhost','127.0.0.1','[::1]'].includes(url.hostname)) throw Error('请更新为归档网站的 HTTPS 地址；只有本机环回地址可用 HTTP。');
+    return url.origin;
+  }
 
   $('toggle').onclick = () => root.querySelector('section').hidden ? (connectionState === 'connected' ? expand() : showSettings()) : collapse();
   $('close').onclick = collapse;
@@ -146,14 +153,13 @@
     ++connectionGeneration;
     $('save').disabled = true;
     try {
-      const url = new URL($('server').value.trim());
-      if (!['http:','https:'].includes(url.protocol) || url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw Error('请填写归档网站的根地址。');
+      const server = serverOrigin($('server').value.trim());
       const value = $('credential').value.trim();
-      if ((!value && (!token || url.origin !== base)) || value.length > 256) throw Error('请填写你在此网站设置的连接密码。');
+      if ((!value && (!token || server !== base)) || value.length > 256) throw Error('请填写你在此网站设置的连接密码。');
       $('status').textContent = '正在验证连接密码…';
-      await checkConnection({server:url.origin,password:value || token});
-      if(base !== url.origin) {++pollingGeneration;clearTimeout(timer);currentTask=null;GM_setValue('activeTask',null);}
-      base = url.origin; token = value || token;
+      await checkConnection({server,password:value || token});
+      if(base !== server) {++pollingGeneration;clearTimeout(timer);currentTask=null;GM_setValue('activeTask',null);}
+      base = server; token = value || token;
       GM_setValue('server',base); GM_setValue('token',token); $('credential').value = '';
       connectionState = 'connected'; showActions(); $('status').textContent = '连接验证成功，已保存。';
       if(currentTask?.id)poll(currentTask.id);
@@ -177,6 +183,7 @@
   document.addEventListener('pointerdown',selectArticle);
 
   function request(path, method = 'GET', body, {server=base,password=token} = {}) {
+    server = serverOrigin(server);
     const encoded = btoa(String.fromCharCode(...new TextEncoder().encode(password))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
     return new Promise((resolve,reject) => GM_xmlhttpRequest({
       method, url:server + '/api/v1' + path, anonymous:true,

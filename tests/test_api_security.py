@@ -1,3 +1,4 @@
+import asyncio
 import tempfile
 import time
 import unittest
@@ -27,6 +28,60 @@ class ApiSecurityTest(unittest.TestCase):
                     response = visitor.post('/api/v1/auth/setup', json={'password': 'test-unused-only'})
                     self.assertEqual(response.status_code, 409)
         self.assertTrue(self.client.get('/api/v1/auth').json()['logged_in'])
+
+    def test_login_rate_limit_does_not_lock_out_another_address(self):
+        with TestClient(self.app, client=('198.51.100.10', 50001)) as attacker, \
+                TestClient(self.app, client=('203.0.113.20', 50002)) as visitor:
+            for _ in range(10):
+                self.assertEqual(attacker.post('/api/v1/auth/login', json={'password': 'test-wrong-only'}).status_code, 401)
+            self.assertEqual(attacker.post('/api/v1/auth/login', json={'password': 'test-admin-only'}).status_code, 429)
+            self.assertEqual(visitor.post('/api/v1/auth/login', json={'password': 'test-admin-only'}).status_code, 200)
+            self.assertTrue(visitor.get('/api/v1/auth').json()['logged_in'])
+            self.assertEqual(attacker.post('/api/v1/auth/login', json={'password': 'test-wrong-only'}).status_code, 429)
+
+    def request_chunks(self, chunks, path='/api/v1/settings'):
+        async def request():
+            received, messages = [], []
+            complete = asyncio.Event()
+
+            async def receive():
+                index = len(received)
+                if index < len(chunks):
+                    received.append(index)
+                    return {'type': 'http.request', 'body': chunks[index], 'more_body': index < len(chunks) - 1}
+                await complete.wait()
+                return {'type': 'http.disconnect'}
+
+            async def send(message):
+                messages.append(message)
+                if message['type'] == 'http.response.body' and not message.get('more_body', False):
+                    complete.set()
+
+            await self.app({'type': 'http', 'asgi': {'version': '3.0'}, 'http_version': '1.1',
+                            'method': 'PUT' if path.endswith('/settings') else 'POST', 'scheme': 'http',
+                            'path': path, 'raw_path': path.encode(), 'query_string': b'',
+                            'headers': [(b'host', b'testserver'), (b'content-type', b'application/json')],
+                            'client': ('198.51.100.10', 50001), 'server': ('testserver', 80)}, receive, send)
+            status = next(message['status'] for message in messages if message['type'] == 'http.response.start')
+            body = b''.join(message.get('body', b'') for message in messages if message['type'] == 'http.response.body')
+            return status, body, len(received)
+
+        return asyncio.run(request())
+
+    def test_body_limit_applies_without_content_length_and_stops_reading(self):
+        prefix = b'{"cookies":"fixture-cookie-only'
+        for chunks, expected_reads in (([prefix + b'x' * 131073 + b'"}'], 1),
+                                       ([prefix, b'x' * 65536, b'x' * 65536, b'"}'], 3)):
+            with self.subTest(chunk_count=len(chunks)):
+                status, body, received = self.request_chunks(chunks)
+                self.assertEqual(status, 413)
+                self.assertNotIn(b'fixture-cookie-only', body)
+                self.assertEqual(received, expected_reads)
+
+    def test_small_chunked_json_remains_available_to_login(self):
+        status, body, _ = self.request_chunks([b'{"password":', b'"test-admin-only"}'], '/api/v1/auth/login')
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b'{"ok":true}')
 
     def test_proxy_schemes_store_privately_and_can_be_kept_or_cleared(self):
         self.assertFalse(self.client.get('/api/v1/settings').json().get('proxy_configured', True))

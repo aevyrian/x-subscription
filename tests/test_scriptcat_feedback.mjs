@@ -3,9 +3,9 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 const source=fs.readFileSync(new URL('../xarchive/integration/xarchive.user.js',import.meta.url),'utf8');
-function harness(resume=false) {
-  const nodes=new Map(), requests=[], timers=new Map(), intervals=[], values=new Map([['server','https://archive.test'],['token','test-only']]);
-  if(resume)values.set('activeTask',{server:'https://archive.test',id:'job'});
+function harness(resume=false,server='https://archive.test') {
+  const nodes=new Map(), requests=[], timers=new Map(), intervals=[], values=new Map([['server',server],['token','test-only']]);
+  if(resume)values.set('activeTask',{server,id:'job'});
   let now=1_792_800_000_000, serial=0;
   const node=id=>{
     if(!nodes.has(id))nodes.set(id,{hidden:['section','settings-view','feedback'].includes(id),disabled:false,textContent:'',value:'',style:{setProperty(){}},
@@ -63,4 +63,32 @@ resumed.reply(1,{error:'任务不存在'},404);await resumed.flush();
 assert.equal(resumed.values.get('activeTask'),null,'A removed task must not be resumed forever');
 assert.equal(resumed.timers.size,0);
 assert.equal(resumed.node('status').textContent,'任务不存在');
-console.log('ScriptCat immediate feedback, slow response, polling, reconnect and refresh checks passed');
+for(const server of ['http://archive.test','http://nas.example:8787']){
+  const legacy=harness(true,server);await legacy.flush();
+  assert.equal(legacy.requests.length,0,'Old network HTTP settings must never send stored credentials');
+  assert.match(legacy.node('status').textContent,/HTTPS/);
+  legacy.node('server').value=server;legacy.node('credential').value='test-replacement-only';
+  await legacy.node('settings-view').onsubmit({preventDefault(){}});
+  assert.equal(legacy.requests.length,0,'Saving network HTTP must fail before verification sends credentials');
+  assert.match(legacy.node('status').textContent,/HTTPS/);
+  assert.equal(legacy.values.get('server'),server,'Insecure old settings are not silently migrated');
+  assert.equal(legacy.values.get('token'),'test-only','Rejected settings do not replace the stored credential');
+  assert.equal(legacy.node('status').textContent.includes('test-replacement-only'),false);
+}
+for(const server of ['http://localhost:8787','http://127.0.0.1:8787','http://[::1]:8787']){
+  const local=harness(false,server);
+  assert.equal(local.requests.length,1,'Loopback HTTP remains available');
+  assert.equal(local.requests[0].url,server+'/api/v1/connection/check');
+  local.reply(0,{ok:true,method:'password'});await local.flush();
+  local.node('server').value=server;local.node('credential').value='';
+  const save=local.node('settings-view').onsubmit({preventDefault(){}});
+  local.reply(1,{ok:true,method:'password'});await save;
+  assert.equal(local.values.get('server'),server);
+}
+const secure=harness();secure.reply(0,{ok:true,method:'password'});await secure.flush();
+secure.node('server').value='https://secure.example';secure.node('credential').value='test-secure-only';
+const secureSave=secure.node('settings-view').onsubmit({preventDefault(){}});
+assert.equal(secure.requests[1].url,'https://secure.example/api/v1/connection/check');
+secure.reply(1,{ok:true,method:'password'});await secureSave;
+assert.equal(secure.values.get('server'),'https://secure.example');
+console.log('ScriptCat feedback, polling, resume, HTTPS enforcement and loopback HTTP checks passed');
