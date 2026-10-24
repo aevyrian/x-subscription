@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -39,7 +40,7 @@ def parse_cookies(value):
 
 def classify_error(text, code):
     text = text.lower()
-    if any(x in text for x in ('429', 'rate limit', 'ratelimit')):
+    if re.search(r'\b429\b|rate[ -]?limit', text):
         return 'X 请求限流，稍后自动重试'
     if any(x in text for x in ('401', '403', 'authentication', 'login', 'cookies', 'unauthorized', 'locked')):
         return 'X 登录失效或访问受限，请在设置中更新 Cookie'
@@ -70,7 +71,7 @@ class Engine:
                 'retries': 2, 'timeout': 30,
                 'postprocessors': [{'name': 'metadata', 'event': 'post', 'filename': '{tweet_id}.json'}],
                 'twitter': {'cookies': self.store.setting('x_cookies', {}), 'text-tweets': True,
-                            'retweets': False, 'quoted': False, 'ratelimit': 'wait', 'retries-api': 2,
+                            'retweets': False, 'quoted': False, 'ratelimit': 'abort', 'retries-api': 2,
                             'videos': True, 'articles': False}},
             'output': {'mode': 'null', 'progress': False},
         }
@@ -85,15 +86,17 @@ class Engine:
         timed_out = False
 
         def index_saved():
-            posts, media = index_folder(self.store, task['user'])
-            self.store.execute('''UPDATE tasks SET new_posts=new_posts+?,new_media=new_media+?,scanned_posts=?
-                                  WHERE id=?''', (posts, media, scanned[0], task['id']))
+            with self.store.connect() as db:
+                posts, media = index_folder(self.store, task['user'], db=db)
+                db.execute('''UPDATE tasks SET new_posts=new_posts+?,new_media=new_media+?,scanned_posts=?
+                              WHERE id=?''', (posts, media, scanned[0], task['id']))
 
         try:
             with os.fdopen(fd, 'w', encoding='utf-8') as stream:
                 os.chmod(filename, 0o600)
                 json.dump(settings, stream)
-            command = [sys.executable, '-m', 'gallery_dl', '--config-ignore', '-c', filename,
+            # Flush progress markers through the pipe while downloads are still running.
+            command = [sys.executable, '-u', '-m', 'xarchive.gallery_runner', '--config-ignore', '-c', filename,
                        '--no-input', '--no-colors', '--windows-filenames',
                        '--Print', 'after:XARCHIVE_SAVED ', '--Print', 'post:XARCHIVE_POST ']
             if task['limit_count']:
@@ -123,10 +126,10 @@ class Engine:
                 if deadline and time.monotonic() >= deadline:
                     timed_out = True
                     break
-                if count[0] != reported:
+                if (count[0], scanned[0]) != reported:
                     progress(count[0])
                     self.store.execute('UPDATE tasks SET scanned_posts=? WHERE id=?', (scanned[0],task['id']))
-                    reported = count[0]
+                    reported = (count[0], scanned[0])
                 if time.monotonic() - last_index >= 5:
                     index_saved()
                     last_index = time.monotonic()
@@ -137,8 +140,11 @@ class Engine:
             progress(count[0])
             if interrupted():
                 raise Interrupted()
+            output = ''.join(lines)
+            if re.search(r'\b429\b|rate[ -]?limit', output, re.IGNORECASE):
+                raise DownloadError('X 请求限流，15 分钟后自动重试', retry_after=900)
             if process.returncode:
-                raise DownloadError(classify_error(''.join(lines), process.returncode))
+                raise DownloadError(classify_error(output, process.returncode))
             if not scanned[0]:
                 raise DownloadError('没有读取到帖子。博主可能没有内容、访问受限，或 Cookie 已失效')
         finally:

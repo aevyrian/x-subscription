@@ -87,4 +87,23 @@ assert.equal(submit.path,'/tasks');
 assert.equal(submit.body.url,'@spacex');
 assert.equal(submit.body.mode,'download');
 
+app.run(`taskItems=[{id:'single-post',user:'example',post_id:'123',url:'https://x.com/example/status/123',status:'succeeded'}]`);
+assert.match(app.run(`taskActions(taskItems[0])`),/data-action="download-task"/);
+app.calls.length=0;
+await app.run(`action({dataset:{action:'download-task',id:'single-post'}})`);
+assert.equal(app.calls.find(call=>call.method==='POST').body.url,'https://x.com/example/status/123','Checking one post must keep the original target');
+
+app.run(`state={view:'settings',section:'updates'};api=async()=>({proxy_configured:true,default_schedule:'monthly'})`);
+assert.match(await app.run('renderSettings()'),/id="proxy"/);
+app.run(`api=async(path,method,body)=>{calls.push({path,method,body});return {proxy_configured:true}};route=async()=>{}`);
+app.node('proxy').value='http://proxy.example:7890';
+app.node('clear-proxy').checked=false;
+app.node('default-schedule').value='monthly';
+app.run('bindSettings()');app.calls.length=0;
+await app.node('settings-form').onsubmit({preventDefault(){},submitter:{disabled:false}});
+assert.equal(app.calls.find(call=>call.method==='PUT').body.x_proxy,'http://proxy.example:7890');
+app.node('proxy').value='';app.node('clear-proxy').checked=true;app.calls.length=0;
+await app.node('settings-form').onsubmit({preventDefault(){},submitter:{disabled:false}});
+assert.equal(app.calls.find(call=>call.method==='PUT').body.clear_proxy,true);
+
 console.log('X task layouts: persistence, storage failure, filtering, refresh, mobile detail and shared API actions passed.');

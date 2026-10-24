@@ -109,6 +109,44 @@ class EngineTests(unittest.TestCase):
             client.cookies.clear()
             self.assertEqual(client.get(url).status_code, 401)
 
+    def test_progress_arrives_before_gallery_dl_exits(self):
+        source = Path(self.tmp.name) / 'live-source'
+        source.mkdir()
+        for name in ('first.jpg', 'second.jpg'):
+            (source / name).write_bytes(b'local-progress-fixture')
+        saved = threading.Event()
+        observed = []
+
+        class SlowHandler(QuietHandler):
+            def do_GET(self):
+                if self.path == '/second.jpg':
+                    observed.append(saved.wait(3))
+                super().do_GET()
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), functools.partial(SlowHandler, directory=str(source)))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            job, _ = self.store.submit('example')
+            job['url'] = f'http://127.0.0.1:{server.server_port}/first.jpg'
+            self.store.set_setting('x_cookies', {'auth_token': 'test-only'})
+            engine = Engine(self.store)
+            config = engine.config(job)
+            config['extractor']['filename'] = '{filename}.{extension}'
+            config['extractor']['keywords'] = {'tweet_id': 123, 'author': {'name': 'example'}}
+            spawn = subprocess.Popen
+
+            def two_files(command, **kwargs):
+                return spawn([*command, f'http://127.0.0.1:{server.server_port}/second.jpg'], **kwargs)
+
+            with patch.object(engine, 'config', return_value=config), patch('xarchive.engine.subprocess.Popen', side_effect=two_files):
+                engine(job, lambda: False, lambda n: saved.set() if n else None)
+            self.assertEqual(observed, [True], 'Saved progress must be visible while the next file is still downloading')
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
 
 if __name__ == '__main__':
     unittest.main()

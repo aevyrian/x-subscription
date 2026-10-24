@@ -4,7 +4,7 @@
 
 拾存是一个自托管的 X / Twitter 归档工具：从 X 页面或网站添加帖子与博主，由 gallery-dl 保存文字、图片和视频，再在私人网站里浏览、播放、收藏和整理。后端、网站和 ScriptCat 脚本共用同一套数据；一个 Docker 镜像即可运行。
 
-[正式版 v1.0.1](https://github.com/aevyrian/x-subscription/releases/tag/v1.0.1) · [更新说明](CHANGELOG.md) · [NAS 部署模板](compose.nas.yaml)
+[正式版 v1.0.2](https://github.com/aevyrian/x-subscription/releases/tag/v1.0.2) · [更新说明](CHANGELOG.md) · [NAS 部署模板](compose.nas.yaml)
 
 ## 能做什么
 
@@ -37,7 +37,7 @@ gallery-dl 负责解析与下载；拾存负责队列、计划、归档索引和
 需要已有 Docker Engine 与 Compose。下载正式版源码，或克隆指定版本：
 
 ```sh
-git clone --branch v1.0.1 --depth 1 https://github.com/aevyrian/x-subscription.git
+git clone --branch v1.0.2 --depth 1 https://github.com/aevyrian/x-subscription.git
 cd x-subscription
 docker compose up -d --build
 ```
@@ -59,8 +59,8 @@ docker compose up -d --build
 使用 [compose.nas.yaml](compose.nas.yaml)，它把配置和媒体分开挂载到宿主机。以下操作在新项目目录进行，已有安装先备份，保留其原有数据路径和部署配置。
 
 1. 准备 `data/config` 和 `data/downloads` 两个目录，让容器用户有读写权限。模板默认 UID / GID 为 `10001:10001`；可通过 `PUID`、`PGID` 改为 NAS 上实际拥有这些目录的用户。
-2. 将模板端口中的 `XARCHIVE_BIND` 设为 NAS 的局域网 IP；`XARCHIVE_PORT` 默认 `8787`，使用前确认没有被占用。可在同目录私有 `.env` 文件中设置这些值。
-3. 执行 `docker compose -f compose.nas.yaml up -d --build`，打开 `http://你的NAS地址:8787`。
+2. 模板默认只绑定本机环回地址；已有反向代理需要从其他机器连接时，再将 `XARCHIVE_BIND` 设为 NAS 的局域网 IP。`XARCHIVE_PORT` 默认 `8787`，使用前确认没有被占用。可在同目录私有 `.env` 文件中设置这些值。
+3. 执行 `docker compose -f compose.nas.yaml up -d --build`，通过配置好的可信 HTTPS 入口访问管理网站。
 
 Linux 终端准备默认目录权限的示例：
 
@@ -69,12 +69,12 @@ mkdir -p data/config data/downloads
 sudo chown -R 10001:10001 data/config data/downloads
 ```
 
-只对本项目的新目录设置权限；已有媒体仓库按其实际权限配置挂载，避免递归修改旧目录。外网管理访问请另配受保护的 HTTPS 入口；单帖分享使用独立域名，配置见下文。
+只对本项目的新目录设置权限；已有媒体仓库按其实际权限配置挂载，避免递归修改旧目录。正式 NAS 管理应通过带可信证书的 HTTPS 入口访问；本机环回地址可继续使用 HTTP。模板仍提供 HTTP 服务，不自动配置证书或 HTTPS，局域网 HTTP 仍不加密网站密码和 Cookie。单帖分享使用独立域名，配置见下文。
 
 ## 第一次使用
 
 1. **登录网站**：首次设置至少 8 字符的网站密码，后续用它进入私人归档。
-2. **连接 X**：在设置的 X 登录状态中填写当前账号 Cookie，支持 Cookie 请求头或 Netscape cookies.txt 内容，至少包含有效的 `auth_token`。需要代理时，在网络设置填写服务端能访问的代理地址。
+2. **连接 X**：在设置的 X 登录状态中填写当前账号 Cookie，支持 Cookie 请求头或 Netscape cookies.txt 内容，至少包含有效的 `auth_token`。需要代理时，在 **设置 → 下载与更新 → 下载代理** 填写服务端可访问的 HTTP / HTTPS 代理地址；地址和凭据不会回显，留空保留现有配置，勾选「清除当前代理」可恢复直接连接。
 3. **添加内容**：填写 X 帖子链接、博主主页或 `@用户名`。博主默认保存全部可读取内容并每月更新，也可选每天、每周或一次性；单帖始终只下载一次。
 4. **浏览和整理**：下载任务开始后逐步出现在归档里。计划页可调整频率、暂停、立即更新和星标；下载页可查看进度、取消或重试。
 
@@ -85,10 +85,12 @@ Cookie 仅在服务器使用，不放进脚本，也不会由设置接口回显�
 先在浏览器中安装并启用 ScriptCat（脚本猫），再打开归档网站的 **设置 → 连接与扩展**：
 
 1. 设置自己的连接密码，至少 8 字符；多台浏览器可使用同一个密码。
-2. 点击页面里的脚本安装入口，或访问 `http://你的归档地址:8787/integrations/xarchive.user.js`，在脚本猫中确认安装。
+2. 点击页面里的脚本安装入口，在脚本猫中确认安装；也可在归档网站根地址后加 `/integrations/xarchive.user.js` 访问脚本。
 3. 刷新 X 页面，打开拾存浮窗的「连接设置」，填写归档网站根地址和相同的连接密码，点击「验证并保存」。显示「已连接」后即可下载或添加订阅。
 
-当前脚本为 **1.4.1**。首次安装后，在浮窗连接设置中填写自己的归档网站地址和连接密码。脚本不预设任何站点地址，也不含自动更新链接；更新时从归档网站「连接与扩展」重新安装当前版本。
+当前脚本为 **1.4.2**。首次安装后，在浮窗连接设置中填写自己的归档网站地址和连接密码。脚本不预设任何站点地址，也不含自动更新链接；更新时从归档网站「连接与扩展」重新安装当前版本。
+
+点击下载后，按钮立即变为深色，并显示提交、排队、解析、已保存数量和已用时间。任务状态每秒更新，短暂断线自动重连，刷新 X 后继续跟踪未完成任务；下载总量未知时不显示虚假的百分比。
 
 连接会在启动和保存时向服务器实际验证，错误密码不会保存。改连接密码后，各浏览器需要重新填写；旧版独立连接仍兼容，可在旧版连接管理里撤销。脚本连接只允许验证、提交和跟踪下载任务，不能读取设置或私人媒体库。新装脚本没有反应时，先确认脚本猫已允许它在 X 上运行，再刷新页面。
 
@@ -133,6 +135,7 @@ python3 -m venv .venv
 xarchive/
 ├── app.py / store.py       # API、认证、数据及持久队列
 ├── worker.py / engine.py   # 计划调度与 gallery-dl
+├── gallery_runner.py       # JSON 原子保存适配
 ├── library.py / migrate.py # 归档索引与旧库导入
 ├── avatars.py / sharing.py # 头像缓存和单帖分享
 ├── static/                # 网站与媒体查看器
@@ -146,10 +149,12 @@ tests/                     # 自动检查
 .venv/Scripts/python.exe -m unittest discover -s tests -v
 node --check xarchive/static/app.js
 node --check xarchive/integration/xarchive.user.js
+node tests/test_task_layout.mjs
+node tests/test_scriptcat_feedback.mjs
 ```
 
-v1.0.0 的 23 项自动检查涵盖队列恢复、计划、Cookie 解析、接口权限、连接密码、去重配置、旧库导入和分享。此前已在真实 X / ScriptCat / NAS 链路验证新图帖、新视频帖落盘及网页播放；已订阅博主更新补入新帖，重复更新没有新增媒体文件。上述历史实测不代表所有账号、帖子和平台状态。
+v1.0.2 已通过 38 项 Python 自动检查，以及下载页布局、ScriptCat 即时反馈两个 JavaScript 场景检查。检查涵盖队列恢复、限流回队、收尾写库重试、JSON 原子保存、索引与计数事务、接口权限、代理设置、连接密码、旧库导入和分享。此前已在真实 X / ScriptCat / NAS 链路验证新图帖、新视频帖落盘及网页播放；已订阅博主更新补入新帖，重复更新没有新增媒体文件。上述历史实测不代表所有账号、帖子和平台状态，也不代替目标 NAS 部署与真实 X 下载的现场验收。
 
-**已知边界**：X 限流、登录状态、账号权限和搜索返回范围会影响完整性；不保证下载不可见或已删除内容。当前不采集评论、转帖、引用帖和文章；大仓库仍按博主扫描索引。手机仅做模拟尺寸检查；长期自动计划、长视频及 Chrome 中用户自设新密码的完整真实下载链路未全面验证。本次正式发布没有重新执行 NAS 部署或真实 X 下载。
+**已知边界**：X 限流、登录状态、账号权限和搜索返回范围会影响完整性；不保证下载不可见或已删除内容。当前不采集评论、转帖、引用帖和文章；大仓库仍按博主扫描索引。手机仅做模拟尺寸检查；长期自动计划、长视频及 Chrome 中用户自设新密码的完整真实下载链路未全面验证。HTTPS 入口需要单独配置并验证，本次升级不会自动加密原有 HTTP 管理连接。
 
 本项目用于保存自己有权访问的内容。发布包不包含运行数据库、Cookie、下载媒体、本机工作记录或旧项目 Git 历史。

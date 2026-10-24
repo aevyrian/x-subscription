@@ -10,6 +10,7 @@ import time
 from typing import Literal
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -65,6 +66,8 @@ class ClientNew(Body):
 class SettingsEdit(Body):
     cookies: SecretStr | None = Field(default=None, max_length=100000)
     clear_cookies: bool = False
+    x_proxy: SecretStr | None = Field(default=None, max_length=2048)
+    clear_proxy: bool = False
     default_schedule: Literal['once', 'daily', 'weekly', 'monthly'] = 'monthly'
 
 
@@ -186,7 +189,10 @@ def create_app(data_dir=None, run_worker=True, runner=None):
     @app.get('/health')
     def health():
         store.query('SELECT 1')
-        return {'status': 'ok', 'worker': bool(worker.thread and worker.thread.is_alive())}
+        worker_ok = worker.healthy()
+        healthy = not run_worker or worker_ok
+        return JSONResponse({'status': 'ok' if healthy else 'degraded', 'worker': worker_ok},
+                            status_code=200 if healthy else 503)
 
     @app.get('/api/v1/auth')
     def auth_state(request: Request):
@@ -198,14 +204,17 @@ def create_app(data_dir=None, run_worker=True, runner=None):
 
     @app.post('/api/v1/auth/setup')
     def setup(body: Password, request: Request, response: Response):
-        salt = secrets.token_hex(16)
-        value = {'salt': salt, 'hash': password_hash(body.password.get_secret_value(), salt)}
-        with store.connect() as db:
-            import json
-            try:
-                db.execute('INSERT INTO settings VALUES (?,?)', ('admin', json.dumps(value)))
-            except sqlite3.IntegrityError:
+        with login_lock:
+            if store.setting('admin'):
                 raise HTTPException(409, '网站已初始化，请登录')
+            salt = secrets.token_hex(16)
+            value = {'salt': salt, 'hash': password_hash(body.password.get_secret_value(), salt)}
+            with store.connect() as db:
+                import json
+                try:
+                    db.execute('INSERT INTO settings VALUES (?,?)', ('admin', json.dumps(value)))
+                except sqlite3.IntegrityError:
+                    raise HTTPException(409, '网站已初始化，请登录')
         session(response, request)
         return {'ok': True}
 
@@ -355,6 +364,7 @@ def create_app(data_dir=None, run_worker=True, runner=None):
         import gallery_dl.version
         return {'cookie_configured': bool(store.setting('x_cookies')),
                 'connection_password_configured': bool(store.setting('connection_password')),
+                'proxy_configured': bool(store.setting('x_proxy')),
                 'legacy_attached': bool(store.legacy),
                 'default_schedule': store.setting('default_schedule', 'monthly'),
                 'engine_version': gallery_dl.version.__version__, 'data_dir': str(store.root)}
@@ -362,16 +372,33 @@ def create_app(data_dir=None, run_worker=True, runner=None):
     @app.put('/api/v1/settings')
     def save_settings(body: SettingsEdit, _=Depends(admin)):
         cookies = None
+        proxy = None
         if body.clear_cookies:
             cookies = {}
         elif body.cookies and body.cookies.get_secret_value().strip():
             cookies = parse_cookies(body.cookies.get_secret_value())
+        if body.clear_proxy:
+            proxy = ''
+        elif body.x_proxy and body.x_proxy.get_secret_value().strip():
+            proxy = body.x_proxy.get_secret_value().strip()
+            try:
+                parsed = urlsplit(proxy)
+                port = parsed.port
+                valid = (parsed.scheme in ('http', 'https') and parsed.hostname
+                         and (port is None or 1 <= port <= 65535) and parsed.path in ('', '/')
+                         and not parsed.query and not parsed.fragment and not any(c.isspace() for c in proxy))
+            except ValueError:
+                valid = False
+            if not valid:
+                raise ValueError('代理地址需要有效的 HTTP / HTTPS 根地址和端口')
         # Validate everything before persisting any settings.
         with store.connect() as db:
             import json
             values = {'default_schedule': body.default_schedule}
             if cookies is not None:
                 values['x_cookies'] = cookies
+            if proxy is not None:
+                values['x_proxy'] = proxy
             for key, value in values.items():
                 db.execute('INSERT INTO settings VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', (key, json.dumps(value)))
         return {'ok': True}

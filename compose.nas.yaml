@@ -3,7 +3,7 @@ name: xarchive
 services:
   archive:
     build: .
-    image: xarchive:1.0.0
+    image: xarchive:1.0.2
     init: true
     user: "${PUID:-10001}:${PGID:-10001}"
     environment:

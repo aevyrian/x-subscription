@@ -3,6 +3,7 @@ import hashlib
 import re
 import time
 from pathlib import Path
+from contextlib import nullcontext
 
 from .store import target
 from .avatars import avatar_url_ok
@@ -23,7 +24,7 @@ def safe_file(store, relative):
     return path
 
 
-def index_folder(store, user, legacy=False):
+def index_folder(store, user, legacy=False, db=None):
     root = store.legacy if legacy else store.downloads
     if root is None:
         raise ValueError('旧归档只读卷未挂载')
@@ -41,7 +42,7 @@ def index_folder(store, user, legacy=False):
         match = re.fullmatch(r'(\d{1,25})_\d+\.[A-Za-z0-9]+', path.name)
         if match and path.suffix.lower() in KINDS:
             media_by_post.setdefault(match[1], []).append(path)
-    with store.connect() as db:
+    with (store.connect() if db is None else nullcontext(db)) as db:
         for meta in files:
             match = re.fullmatch(r'(?:[A-Za-z0-9_]{1,50}_)?(\d{1,25})\.json', meta.name)
             if not match:

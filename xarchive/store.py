@@ -228,13 +228,15 @@ class Store:
             db.execute("""UPDATE tasks SET status='queued',attempts=0,next_run=?,finished=NULL,
                           started=NULL,error=NULL WHERE id=?""", (time.time(), identifier))
 
-    def finish(self, task, result=None, error=None):
+    def finish(self, task, result=None, error=None, retry_after=None):
         with self.connect() as db:
             if error:
-                status = 'retry' if task['attempts'] < task['max_attempts'] else 'failed'
-                db.execute('''UPDATE tasks SET status=?,error=?,next_run=?,finished=?
+                limited = retry_after is not None
+                status = 'retry' if limited or task['attempts'] < task['max_attempts'] else 'failed'
+                delay = max(1, retry_after) if limited else 30 * 2 ** (task['attempts'] - 1)
+                db.execute('''UPDATE tasks SET status=?,error=?,attempts=MAX(attempts-?,0),next_run=?,finished=?
                               WHERE id=? AND status='running' ''',
-                           (status, error, time.time() + 30 * 2 ** (task['attempts'] - 1),
+                           (status, error, int(limited), time.time() + delay,
                             time.time(), task['id']))
             else:
                 posts, media = result or (0, 0)
