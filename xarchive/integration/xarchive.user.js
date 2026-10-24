@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         拾存 · X 下载与归档
 // @namespace    xarchive.personal
-// @version      1.4.3
+// @version      1.4.4
 // @description  下载帖子、推送博主、订阅更新，并打开自己的归档。
 // @match        https://x.com/*
 // @match        https://www.x.com/*
@@ -44,7 +44,7 @@
       <form id="settings-view" hidden>
         <label>归档网站地址<input id="server" type="url" placeholder="https://your-archive.example" required></label>
         <label>连接密码<input id="credential" type="password" autocomplete="off" placeholder="填写你在网站设置的连接密码；留空验证已保存的连接"></label>
-        <small>所有浏览器使用同一个连接密码；X Cookie 在网站设置中填写。</small>
+        <small>所有浏览器使用同一个连接密码；X Cookie 在网站设置中填写。内网可用私有 IP 的 HTTP 地址，外网使用 HTTPS；HTTP 不加密连接密码。</small>
         <button id="save" class="primary" type="submit">验证并保存</button>
       </form>
       <div id="feedback" hidden><small id="task-subject"></small><progress id="progress" aria-label="下载正在进行"></progress><small id="elapsed"></small><button id="tasks">查看下载任务 ↗</button></div>
@@ -137,9 +137,12 @@
   function configured() {if (base && token && connectionState === 'connected') return true; showSettings(); $('status').textContent = '请填写归档网站地址和连接密码，并点击验证。'; return false;}
   function serverOrigin(value) {
     let url;
-    try {url = new URL(value);} catch {throw Error('请填写归档网站的 HTTPS 根地址。');}
-    if (!['http:','https:'].includes(url.protocol) || url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw Error('请填写归档网站的 HTTPS 根地址。');
-    if (url.protocol === 'http:' && !['localhost','127.0.0.1','[::1]'].includes(url.hostname)) throw Error('请更新为归档网站的 HTTPS 地址；只有本机环回地址可用 HTTP。');
+    try {url = new URL(value);} catch {throw Error('请填写归档网站的根地址：外网用 HTTPS，内网可用 HTTP 私有 IP。');}
+    if (!['http:','https:'].includes(url.protocol) || url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw Error('请填写归档网站的根地址：外网用 HTTPS，内网可用 HTTP 私有 IP。');
+    const ip = url.hostname.split('.').map(Number);
+    const privateIPv4 = /^\d+\.\d+\.\d+\.\d+$/.test(url.hostname) && ip.every(octet => Number.isInteger(octet) && octet >= 0 && octet <= 255)
+      && (ip[0] === 10 || ip[0] === 172 && ip[1] >= 16 && ip[1] <= 31 || ip[0] === 192 && ip[1] === 168);
+    if (url.protocol === 'http:' && !privateIPv4 && !['localhost','127.0.0.1','[::1]'].includes(url.hostname)) throw Error('公网连接请使用 HTTPS；HTTP 仅支持内网私有 IPv4 或本机环回地址。');
     return url.origin;
   }
 
