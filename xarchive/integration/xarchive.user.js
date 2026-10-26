@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         拾存 · X 下载与归档
 // @namespace    xarchive.personal
-// @version      1.4.6
+// @version      1.4.7
 // @description  下载帖子、推送博主、订阅更新，并打开自己的归档。
 // @match        https://x.com/*
 // @match        https://www.x.com/*
@@ -36,7 +36,7 @@
         <p id="subject">打开博主主页，或将鼠标移到帖子上。</p>
         <div class="actions">
           <button id="post">下载当前帖子</button>
-          <button id="profile" title="保存此博主的全部可读取内容">添加博主订阅</button>
+          <button id="profile" title="检查历史范围并添加更新计划">添加博主订阅</button>
           <button id="archive">打开对应归档 ↗</button>
         </div>
         <label>什么时候更新 <select id="schedule" aria-label="更新频率"><option value="three_days">每三天一次</option><option value="weekly">每七天一次</option><option value="monthly">每月一次</option><option value="quarterly">每季度一次</option><option value="yearly">每年一次</option><option value="once">仅下载这一次</option></select></label>
@@ -58,7 +58,7 @@
   let hovered = null, lastURL = location.href, timer = null, pollingGeneration = 0, busy = false;
   let connectionState = base && token ? 'checking' : 'unconfigured', connectionGeneration = 0;
   let currentTask = null, pollError = '';
-  const active = () => currentTask && ['submitting','queued','running','retry'].includes(currentTask.status);
+  const active = () => currentTask && ['submitting','queued','running','retry','awaiting_confirmation'].includes(currentTask.status);
   if (!GM_getValue('quarterlyDefaultV1',false)) {
     GM_setValue('schedule','quarterly');
     GM_setValue('quarterlyDefaultV1',true);
@@ -108,9 +108,9 @@
     $('subject').textContent = item ? '@' + item.user + (item.post ? ' · 当前选中帖子' : ' · 博主主页') : '打开博主主页，或将鼠标移到帖子上。';
     $('post').disabled = busy || connectionState === 'checking' || !item?.post || !!(samePost && active());
     $('profile').disabled = busy || connectionState === 'checking' || !item?.user || !!(sameProfile && active());
-    const labels = {submitting:'正在提交…',queued:'已排队',running:'正在下载…',retry:'等待重试…',succeeded:'已下载 · 再次检查'};
+    const labels = {submitting:'正在提交…',queued:'已排队',running:'正在下载…',retry:'等待重试…',awaiting_confirmation:'请到网站确认历史范围',succeeded:'已下载 · 再次检查'};
     $('post').textContent = samePost && labels[currentTask.status] || '下载当前帖子';
-    $('profile').textContent = sameProfile && labels[currentTask.status] || ($('schedule').value === 'once' ? '下载博主全部内容' : '添加博主订阅');
+    $('profile').textContent = sameProfile && labels[currentTask.status] || ($('schedule').value === 'once' ? '下载博主历史内容' : '添加博主订阅');
     $('post').classList.toggle('primary',!!(samePost && (active() || currentTask.status === 'succeeded')));
     $('profile').classList.toggle('primary',!!(sameProfile && active()));
     $('toggle').classList.toggle('active',!!active());
@@ -124,11 +124,12 @@
     if (!currentTask || !$('settings-view').hidden) return;
     const task = currentTask, pending = active();
     $('task-subject').textContent = '@' + task.user + (task.post_id ? ' · 帖子下载' : ' · 博主归档');
-    $('progress').hidden = !pending;
+    $('progress').hidden = !pending || task.status === 'awaiting_confirmation';
     const elapsed = Math.max(0,Math.floor((task.finished || Date.now()/1000) - task.created));
     $('elapsed').textContent = '已用时 ' + Math.floor(elapsed/60) + ':' + String(elapsed%60).padStart(2,'0');
     const names = {submitting:'正在提交到归档网站…',queued:'已加入队列，等待下载。',
-      running:task.scanned_posts || task.progress ? '正在下载 · 已读取 ' + (task.scanned_posts || 0) + ' 篇帖子 · 已保存 ' + (task.progress || 0) + ' 份媒体' : '正在连接 X 并解析帖子…',
+      running:task.scanned_posts || task.progress ? '正在下载 · 已读取 ' + (task.scanned_posts || 0) + ' 条帖子 · 已处理 ' + (task.progress || 0) + ' 条帖子' : '正在连接 X 并解析帖子…',
+      awaiting_confirmation:'历史含媒体帖子超过 1000 条，请到网站下载页确认历史范围。',
       retry:'等待自动重试：' + (task.error || ''),failed:'下载失败：' + (task.error || '请在网站查看'),cancelled:'任务已取消',
       succeeded:'已完成，新增 ' + task.new_posts + ' 篇帖子 / ' + task.new_media + ' 份媒体'};
     $('status').textContent = pollError || names[task.status] || task.status;
@@ -239,7 +240,7 @@
         if (generation !== pollingGeneration) return;
         currentTask = task; pollError = ''; update();
         if (!active()) {GM_setValue('activeTask',null);return;}
-        timer = setTimeout(check,1000);
+        timer = setTimeout(check,task.status === 'awaiting_confirmation' ? 5000 : 1000);
       } catch(error) {
         if (generation !== pollingGeneration) return;
         if(error.status === 401)connectionState='invalid';

@@ -23,7 +23,7 @@ class TaskStoreTests(unittest.TestCase):
             self.task('needle' + str(n), ('queued', 'running', 'retry', 'failed', 'succeeded', 'cancelled')[n % 6])
         self.task('unrelated')
         result = self.store.list_tasks('attention', 'needle', limit=2)
-        self.assertEqual(result['counts'], {'all': 230, 'active': 116, 'attention': 76, 'done': 38})
+        self.assertEqual(result['counts'], {'all': 230, 'active': 116, 'attention': 76, 'done': 38, 'confirmation': 0})
         self.assertEqual((result['total'], len(result['items'])), (76, 2))
         self.assertTrue(all('archive_posts' in task for task in result['items']))
         changed = self.store.bulk_tasks('cancel', 'all', 'needle')

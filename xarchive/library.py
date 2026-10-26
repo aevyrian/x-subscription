@@ -121,8 +121,8 @@ def list_bloggers(store, q='', user='', featured=False, limit=None):
                  a.id active_id,a.status active_status,a.next_run active_next_run,a.source active_source,a.error active_error
                  FROM bloggers b LEFT JOIN subscriptions s ON s.user=b.user
                  LEFT JOIN tasks a ON a.id=(SELECT t.id FROM tasks t WHERE t.user=b.user AND t.post_id IS NULL
-                     AND t.status IN ('queued','running','retry')
-                     ORDER BY CASE t.status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,t.created,t.id LIMIT 1)'''
+                     AND t.status IN ('queued','running','retry','awaiting_confirmation')
+                     ORDER BY CASE t.status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 WHEN 'retry' THEN 2 ELSE 3 END,t.created,t.id LIMIT 1)'''
         query_args = [*args, *order_args]
         sql += clause + ' ORDER BY ' + ordering
         if limit is not None:

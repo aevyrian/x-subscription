@@ -48,7 +48,7 @@ app.reply(1,{task});await submit;await app.flush();
 assert.equal(app.requests[2].url,'https://archive.test/api/v1/tasks/job','Poll starts immediately after acceptance');
 assert.match(app.node('status').textContent,/队列/);
 app.reply(2,{task:{...task,status:'running',scanned_posts:3,progress:1}});await app.flush();
-assert.match(app.node('status').textContent,/已读取 3.*已保存 1/);
+assert.match(app.node('status').textContent,/已读取 3.*已处理 1 条帖子/);
 assert.equal([...app.timers.values()][0].delay,1000);
 app.runTimer();app.requests[3].onerror();await app.flush();
 assert.match(app.node('status').textContent,/重新获取进度/);
@@ -113,4 +113,11 @@ for(const [schedule,migrated,expected] of [['monthly',false,'quarterly'],['daily
   assert.equal(JSON.parse(legacySchedule.requests[1].data).schedule,expected);
   legacySchedule.reply(1,{task:{id:'legacy-schedule',user:'example',status:'queued',created:Date.now()/1000}});await submitted;
 }
-console.log('ScriptCat feedback, polling, resume, HTTPS and private IPv4 HTTP boundary checks passed');
+const waiting=harness(true);waiting.reply(0,{ok:true,method:'password'});await waiting.flush();
+waiting.reply(1,{task:{...task,post_id:null,status:'awaiting_confirmation'}});await waiting.flush();
+assert.match(waiting.node('status').textContent,/网站.*确认/);
+assert.equal(waiting.node('profile').disabled,true,'Pending history must not allow a duplicate profile submission');
+assert.equal(waiting.node('progress').hidden,true,'Waiting for a choice must not look like downloading');
+assert.notEqual(waiting.values.get('activeTask'),null,'Waiting choices remain resumable');
+assert.equal([...waiting.timers.values()][0].delay,5000,'Waiting choices poll less often');
+console.log('ScriptCat feedback, pending history, polling, resume, HTTPS and private IPv4 HTTP boundary checks passed');

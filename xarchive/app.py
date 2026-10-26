@@ -40,14 +40,14 @@ class Password(Body):
 
 
 Schedule = Literal['once', 'daily', 'three_days', 'weekly', 'monthly', 'quarterly', 'yearly']
-TaskFilter = Literal['all', 'active', 'attention', 'done']
+TaskFilter = Literal['all', 'active', 'confirmation', 'attention', 'done']
 
 
 class Intake(Body):
     url: str = Field(min_length=1, max_length=2048)
-    mode: str = Field(default='subscribe', pattern='^(download|blogger|subscribe|once)$')
+    mode: str = Field(default='subscribe', pattern='^(download|update|blogger|subscribe|once)$')
     schedule: Schedule = 'quarterly'
-    # Older installed widgets send these fields; scope is always all posts.
+    # Older installed widgets send these fields; the smart policy controls scope.
     limit: int = Field(default=0, ge=0, le=10000)
     interval_minutes: int | None = None
 
@@ -67,6 +67,10 @@ class TaskBulk(Body):
     action: Literal['cancel', 'retry', 'delete']
     filter: TaskFilter = 'all'
     q: str = Field(default='', max_length=200)
+
+
+class HistoryConfirm(Body):
+    choice: Literal['all', 'recent300', 'skip']
 
 
 class ClientNew(Body):
@@ -261,7 +265,8 @@ def create_app(data_dir=None, run_worker=True, runner=None):
     @app.get('/api/v1/stats')
     def stats(_=Depends(admin)):
         return {**{t: store.query(f'SELECT COUNT(*) n FROM {t}')[0]['n'] for t in ('posts', 'media', 'bloggers', 'subscriptions')},
-                'active_tasks': store.query("SELECT COUNT(*) n FROM tasks WHERE status IN ('queued','running','retry')")[0]['n']}
+                'active_tasks': store.query("SELECT COUNT(*) n FROM tasks WHERE status IN ('queued','running','retry')")[0]['n'],
+                'confirmation_tasks': store.query("SELECT COUNT(*) n FROM tasks WHERE status='awaiting_confirmation'")[0]['n']}
 
     @app.post('/api/v1/tasks')
     def submit(body: Intake, who=Depends(identity)):
@@ -274,7 +279,7 @@ def create_app(data_dir=None, run_worker=True, runner=None):
                 store.add_blogger(parsed['user'], db)
             return {'user': parsed['user'], 'archive_path': '/?user=' + parsed['user']}
         else:
-            task, duplicate = store.submit(body.url, source=who)
+            task, duplicate = store.submit(body.url, source='update' if body.mode == 'update' else who)
         return {'task': task, 'duplicate': duplicate, 'archive_path': archive_path(task)}
 
     def archive_path(task):
@@ -295,6 +300,14 @@ def create_app(data_dir=None, run_worker=True, runner=None):
         if not rows:
             raise HTTPException(404, '任务不存在')
         return {'task': rows[0], 'archive_path': archive_path(rows[0])}
+
+    @app.post('/api/v1/tasks/{identifier}/confirm')
+    def confirm_history(identifier: str, body: HistoryConfirm, _=Depends(admin)):
+        try:
+            task = store.confirm_history(identifier, body.choice)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+        return {'task': task, 'archive_path': archive_path(task)}
 
     @app.post('/api/v1/tasks/{identifier}/{action}')
     def task_action(identifier: str, action: str, _=Depends(admin)):
@@ -430,6 +443,8 @@ def create_app(data_dir=None, run_worker=True, runner=None):
                 db.execute('INSERT INTO settings VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', (key, json.dumps(value)))
             if cookies is not None:
                 db.execute("DELETE FROM settings WHERE key='x_rate_limit_until'")
+                db.execute("""UPDATE tasks SET cooldown_until=0,cooldown_scope='',cooldown_reason='',next_run=MIN(next_run,?)
+                              WHERE cooldown_scope='shared'""", (time.time(),))
                 db.execute("INSERT INTO settings VALUES ('x_cookie_revision','1') ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1")
         return {'ok': True}
 

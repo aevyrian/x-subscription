@@ -67,6 +67,7 @@ class EngineTests(unittest.TestCase):
         thread.start()
         try:
             job, _ = self.store.submit('example')
+            job['task_kind'] = 'legacy'
             job['url'] = f'http://127.0.0.1:{server.server_port}/sample.jpg'
             self.store.set_setting('x_cookies', {'auth_token': 'test-only'})
             engine = Engine(self.store)
@@ -128,6 +129,7 @@ class EngineTests(unittest.TestCase):
         thread.start()
         try:
             job, _ = self.store.submit('example')
+            job['task_kind'] = 'legacy'
             job['url'] = f'http://127.0.0.1:{server.server_port}/first.jpg'
             self.store.set_setting('x_cookies', {'auth_token': 'test-only'})
             engine = Engine(self.store)

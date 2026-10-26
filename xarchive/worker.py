@@ -9,12 +9,21 @@ class Interrupted(Exception):
     pass
 
 
+class BatchComplete(Exception):
+    pass
+
+
+class HistoryConfirmation(Exception):
+    pass
+
+
 class DownloadError(Exception):
     """Only safe, deliberately classified messages may leave the engine."""
 
-    def __init__(self, message, *, retry_after=None):
+    def __init__(self, message, *, retry_after=None, cooldown_scope='shared'):
         super().__init__(message)
         self.retry_after = retry_after
+        self.cooldown_scope = cooldown_scope
 
 
 class Worker:
@@ -48,16 +57,22 @@ class Worker:
         if not task:
             return False
         result = error = retry_after = None
+        cooldown_scope, deferred = 'shared', None
         was_interrupted = False
         try:
             if self.runner is None:
                 raise DownloadError('下载引擎尚未接入')
             result = self.runner(task, lambda: self.interrupted(task['id'], task['generation']),
-                                 lambda n: self.store.execute("UPDATE tasks SET progress=? WHERE id=? AND generation=? AND status='running'", (n, task['id'], task['generation'])))
+                                 lambda n: self.store.execute("UPDATE tasks SET progress=MAX(progress,?) WHERE id=? AND generation=? AND status='running'", (n, task['id'], task['generation'])))
         except Interrupted:
             was_interrupted = True
+        except BatchComplete:
+            deferred = 'queued'
+        except HistoryConfirmation:
+            deferred = 'awaiting_confirmation'
         except DownloadError as exc:
             error, retry_after = str(exc), exc.retry_after
+            cooldown_scope = exc.cooldown_scope
         except Exception:
             # Engine exceptions can contain credentials: expose only the exception category.
             log.error('Task failed unexpectedly; task=%s', task['id'])
@@ -65,12 +80,16 @@ class Worker:
         while True:
             self.last_tick = time.monotonic()
             try:
-                if was_interrupted:
+                if deferred:
+                    self.store.execute("""UPDATE tasks SET status=?,attempts=MAX(attempts-1,0),next_run=?
+                                          WHERE id=? AND status='running' AND generation=?""",
+                                       (deferred, time.time() + 1, task['id'], task['generation']))
+                elif was_interrupted:
                     # A stopped service resumes this item; a user cancellation stays cancelled.
                     self.store.execute("""UPDATE tasks SET status='queued',attempts=MAX(attempts-1,0),next_run=?
                                           WHERE id=? AND status='running' AND generation=?""", (time.time(), task['id'], task['generation']))
                 else:
-                    self.store.finish(task, result=result, error=error, retry_after=retry_after)
+                    self.store.finish(task, result=result, error=error, retry_after=retry_after, cooldown_scope=cooldown_scope)
                 break
             except Exception:
                 log.error('Task state could not be saved; task=%s; retrying', task['id'])

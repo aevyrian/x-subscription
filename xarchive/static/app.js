@@ -16,9 +16,9 @@ let feedSeed=Math.random().toString(36).slice(2),feedSnapshot=0;
 const feedOrders={random:'随机浏览',timeline:'时间：新到旧',oldest:'时间：旧到新'};
 const labels={archive:'首页',favorites:'书签',bloggers:'博主',subscriptions:'计划',tasks:'下载',settings:'设置'};
 const cadence={three_days:'每三天一次',weekly:'每七天一次',monthly:'每月一次',quarterly:'每季度一次',yearly:'每年一次',once:'仅下载这一次'};
-const statuses={queued:'排队中',running:'正在下载',retry:'等待重试',succeeded:'已完成',failed:'失败',cancelled:'已取消'};
+const statuses={queued:'排队中',running:'正在下载',retry:'等待重试',awaiting_confirmation:'待确认',succeeded:'已完成',failed:'失败',cancelled:'已取消'};
 let state={},settings={},posts=new Map(),rows=new Map(),editSave,setupRequired=false,toastTimer,renderSequence=0,total=0,routeController;
-let taskItems=[],taskFilter='all',taskQuery='',selectedTask='',taskLoadError='',taskCounts={all:0,active:0,attention:0,done:0},taskMutationBusy=false,taskSearchTimer,taskCooldownUntil=0;
+let taskItems=[],taskFilter='all',taskQuery='',selectedTask='',taskLoadError='',taskCounts={all:0,active:0,confirmation:0,attention:0,done:0},taskMutationBusy=false,taskSearchTimer,taskCooldownUntil=0;
 const date=v=>v?new Date(typeof v==='number'?v*1000:v.replace(' ','T')).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'—';
 const scheduleOptions=(value='quarterly')=>(value==='daily'?'<option value="daily" selected>每天（旧计划）</option>':'')+Object.entries(cadence).map(([k,v])=>`<option value="${k}" ${value===k?'selected':''}>${v}</option>`).join('');
 function toast(message){$('toast').textContent=message;$('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').hidden=true,4500);}
@@ -35,7 +35,7 @@ async function enter(){settings=await api('/settings');$('auth-screen').hidden=t
 async function overview(){
   const [data,people]=await Promise.all([api('/stats'),api('/bloggers')]);
   $('overview').textContent=`${data.posts.toLocaleString()} 篇帖子 · ${['archive','favorites'].includes(state.view)?feedOrders[state.order]:data.media.toLocaleString()+' 份媒体'}`;
-  $('queue-badge').textContent=data.active_tasks;$('queue-badge').hidden=!data.active_tasks;
+  const waiting=data.active_tasks+(data.confirmation_tasks||0);$('queue-badge').textContent=waiting;$('queue-badge').hidden=!waiting;
   $('side-summary').textContent=`${data.bloggers.toLocaleString()} 位博主 · ${data.media.toLocaleString()} 份图片与视频`;
   const selected=people.items.filter(b=>b.featured);
   $('side-bloggers').innerHTML=selected.slice(0,6).map(b=>`<button class="side-person" data-action="user" data-user="${esc(b.user)}">${avatar(b.user,b.display_name)}<span class="side-person-info"><strong>${esc(b.display_name||b.user)}</strong><small>@${esc(b.user)}</small></span>${icon('chevron')}</button>`).join('')||'<p class="muted">在博主页点亮星标，让喜欢的博主留在这里。</p>';
@@ -76,7 +76,7 @@ function searchBloggerCard(b){
   const hasPlan=!!b.schedule;
   const schedule=hasPlan?(b.schedule==='daily'?'每天（旧计划）':cadence[b.schedule]||'未设频率'):'未设计划';
   const next=!hasPlan?'未设计划':b.schedule==='once'?'不自动更新':!b.enabled?'已暂停':date(b.next_run);
-  return `<article class="person-row search-blogger">${avatar(b.user,b.display_name)}<div class="person-info"><div class="person-header"><div><h3>${esc(b.display_name||b.user)}</h3><span class="muted small">@${esc(b.user)}</span></div>${xLink(b.user)}</div><p class="search-blogger-counts">${b.post_count||0} 篇归档 · ${b.media_count||0} 份媒体 · ${b.favorite_count||0} 篇书签</p><dl class="search-blogger-facts"><dt>更新频率</dt><dd>${esc(schedule)}</dd><dt>最近完整更新</dt><dd>${b.last_success_at?date(b.last_success_at):'暂无记录'}</dd><dt>下次计划</dt><dd>${esc(next)}</dd><dt>内容收录到</dt><dd>${b.last_post_at?date(b.last_post_at):'暂无记录'}</dd></dl>${b.active_task?`<p class="search-blogger-status">当前任务：${esc(statuses[b.active_task.status]||b.active_task.status)}${b.active_task.error?' · '+esc(b.active_task.error):''}</p>`:''}${b.note?`<p>${esc(b.note)}</p>`:''}<div class="actions"><button data-action="user" data-user="${esc(b.user)}">归档</button><button class="quiet" data-action="user-favorites" data-user="${esc(b.user)}">书签</button><button class="quiet" data-action="plan-user" data-user="${esc(b.user)}">计划</button><button class="quiet" data-action="user-tasks" data-user="${esc(b.user)}">任务</button><button class="primary" data-action="download-user" data-user="${esc(b.user)}">立即更新</button></div></div></article>`;
+  return `<article class="person-row search-blogger">${avatar(b.user,b.display_name)}<div class="person-info"><div class="person-header"><div><h3>${esc(b.display_name||b.user)}</h3><span class="muted small">@${esc(b.user)}</span></div>${xLink(b.user)}</div><p class="search-blogger-counts">${b.post_count||0} 篇归档 · ${b.media_count||0} 份媒体 · ${b.favorite_count||0} 篇书签</p><dl class="search-blogger-facts"><dt>更新频率</dt><dd>${esc(schedule)}</dd><dt>最近成功更新</dt><dd>${b.last_success_at?date(b.last_success_at):'暂无记录'}</dd><dt>下次计划</dt><dd>${esc(next)}</dd><dt>内容收录到</dt><dd>${b.last_post_at?date(b.last_post_at):'暂无记录'}</dd></dl>${b.active_task?`<p class="search-blogger-status">当前任务：${esc(statuses[b.active_task.status]||b.active_task.status)}${b.active_task.error?' · '+esc(b.active_task.error):''}</p>`:''}${b.note?`<p>${esc(b.note)}</p>`:''}<div class="actions"><button data-action="user" data-user="${esc(b.user)}">归档</button><button class="quiet" data-action="user-favorites" data-user="${esc(b.user)}">书签</button><button class="quiet" data-action="plan-user" data-user="${esc(b.user)}">计划</button><button class="quiet" data-action="user-tasks" data-user="${esc(b.user)}">任务</button><button class="primary" data-action="download-user" data-user="${esc(b.user)}">立即更新</button></div></div></article>`;
 }
 async function renderArchive(sequence=renderSequence,signal){
   const p=new URLSearchParams({...state,favorite:state.view==='favorites',limit:30,seed:feedSeed,snapshot:feedSnapshot});p.delete('view');p.delete('section');
@@ -88,28 +88,33 @@ async function renderArchive(sequence=renderSequence,signal){
   return authors+data.items.map(postCard).join('');
 }
 const taskActive=r=>['queued','running','retry'].includes(r.status);
-function filteredTasks(){const query=taskQuery.trim().toLowerCase(),exact=/^@[a-z0-9_]{1,15}$/.test(query);return taskItems.filter(r=>(taskFilter==='all'||taskFilter==='active'&&taskActive(r)||taskFilter==='attention'&&['failed','retry'].includes(r.status)||taskFilter==='done'&&r.status==='succeeded')&&(exact?r.user.toLowerCase()===query.slice(1):`${r.user} ${r.post_id||''} ${r.id}`.toLowerCase().includes(query)));}
+function filteredTasks(){const query=taskQuery.trim().toLowerCase(),exact=/^@[a-z0-9_]{1,15}$/.test(query);return taskItems.filter(r=>(taskFilter==='all'||taskFilter==='active'&&taskActive(r)||taskFilter==='confirmation'&&r.status==='awaiting_confirmation'||taskFilter==='attention'&&['failed','retry','awaiting_confirmation'].includes(r.status)||taskFilter==='done'&&r.status==='succeeded')&&(exact?r.user.toLowerCase()===query.slice(1):`${r.user} ${r.post_id||''} ${r.id}`.toLowerCase().includes(query)));}
 function selectedTaskId(items,id){return items.some(r=>r.id===id)?id:items[0]?.id||'';}
+function taskScope(r){return r.post_id?'单条帖子':r.task_kind==='incremental'?'增量更新':r.task_kind==='history'?'历史补齐'+(r.history_choice==='recent300'?' · 最近 300 条含媒体帖子':r.history_choice==='all'?' · 全部分批下载':''):'博主归档';}
+function taskCountSummary(r){return r.post_id||r.media_posts==null?'':`${r.total_posts==null?'总帖数未知':'X 显示 '+r.total_posts+' 条帖子'} · ${r.media_complete?'已发现 ':'至少 '}${r.media_posts} 条含媒体帖子`;}
 function taskResult(r){
-  const next=Math.max(r.next_run||0,taskCooldownUntil);
+  if(r.status==='awaiting_confirmation')return '历史含媒体帖子超过 1000 条，请选择下载范围；其他任务可继续。';
+  const taskNext=Math.max(r.next_run||0,r.cooldown_until||0),next=Math.max(taskNext,taskCooldownUntil);
   if(['queued','retry'].includes(r.status)&&taskCooldownUntil>Date.now()/1000)return 'X 账号限流，整个队列等待至 '+date(next)+'；任务已保留。';
-  return r.status==='running'?(r.scanned_posts?`已读取 ${r.scanned_posts} 篇帖子，保存 ${r.progress} 份媒体。`:'正在连接 X，读取帖子…'):r.status==='succeeded'?(r.new_posts||r.new_media?`本次新增 ${r.new_posts} 篇帖子、${r.new_media} 份媒体。`:'检查完成，没有新增内容。'):r.status==='queued'?(next>Date.now()/1000?'已入队，计划于 '+date(next)+' 开始。':'等待前面的任务完成。'):r.status==='retry'?'将于 '+date(next)+' 再试一次。':r.status==='cancelled'?'任务已取消，已保存的内容会保留。':'本次下载未完成，可以重试。';
+  if(['queued','retry'].includes(r.status)&&r.cooldown_scope==='task'&&taskNext>Date.now()/1000)return '仅此任务等待至 '+date(taskNext)+(r.cooldown_reason?'：'+r.cooldown_reason:'')+'；其他任务可继续。';
+  return r.status==='running'?(r.scanned_posts?`已读取 ${r.scanned_posts} 条帖子，已处理 ${r.progress} 条帖子。`:'正在连接 X，读取帖子…'):r.status==='succeeded'?(r.new_posts||r.new_media?`本次新增 ${r.new_posts} 篇帖子、${r.new_media} 份媒体。`:'检查完成，没有新增内容。'):r.status==='queued'?(next>Date.now()/1000?'已入队，计划于 '+date(next)+' 开始。':'等待前面的任务完成。'):r.status==='retry'?'将于 '+date(next)+' 再试一次。':r.status==='cancelled'?(r.history_choice==='skip'?'已跳过历史抓取，订阅和增量更新保持不变。':'任务已取消，已保存的内容会保留。'):'本次下载未完成，可以重试。';
 }
 function taskBadge(r){return `<span class="badge ${esc(r.status)}">${esc(statuses[r.status]||r.status)}</span>`;}
 function taskActions(r){
-  const active=taskActive(r),id=esc(r.id);
+  const active=taskActive(r)||r.status==='awaiting_confirmation',id=esc(r.id);
   return `<button data-action="user" data-user="${esc(r.user)}">查看归档</button>`
-    +(['failed','cancelled','retry'].includes(r.status)?`<button class="task-retry" data-action="retry" data-id="${id}">${icon('refresh')}重试</button>`:'')
+    +(r.status==='awaiting_confirmation'?`<button class="primary" data-action="confirm-history" data-id="${id}" data-choice="all">全部分批下载</button><button data-action="confirm-history" data-id="${id}" data-choice="recent300">最近 300 条</button><button class="quiet" data-action="confirm-history" data-id="${id}" data-choice="skip">跳过历史抓取</button>`:'')
+    +(['failed','cancelled','retry'].includes(r.status)&&r.history_choice!=='skip'?`<button class="task-retry" data-action="retry" data-id="${id}">${icon('refresh')}重试</button>`:'')
     +(active||r.status==='failed'?`<button class="quiet" data-action="cancel" data-id="${id}">取消</button>`:'')
     +(r.status==='succeeded'?`<button class="quiet" data-action="download-task" data-id="${id}">再次检查</button>`:'')
     +(!active?`<button class="quiet danger" data-action="delete" data-id="${id}">删除任务</button>`:'');
 }
-function taskDetails(r){return `<div class="task-detail-identity">${avatar(r.user)}<div><h3>@${esc(r.user)}</h3>${xLink(r.user,r.post_id)}<span class="muted small">${r.post_id?'单条帖子':'博主 · 全部可读取的帖子'}</span></div></div><div class="task-detail-result">${taskBadge(r)}<p>${esc(taskResult(r))}</p>${r.error?`<p class="error">${esc(r.error)}</p>`:''}</div><dl class="task-detail-fields"><dt>添加时间</dt><dd>${date(r.created)}</dd><dt>开始时间</dt><dd>${r.started?date(r.started):'尚未开始'}</dd><dt>尝试次数</dt><dd>${r.attempts} 次</dd>${r.status==='retry'?`<dt>下次重试</dt><dd>${date(r.next_run)}</dd>`:''}${r.post_id?`<dt>帖子 ID</dt><dd>${esc(r.post_id)}</dd>`:''}<dt>已有归档</dt><dd>${r.archive_posts} 篇帖子</dd><dt>任务编号</dt><dd class="task-id">${esc(r.id)}</dd></dl><div class="actions">${taskActions(r)}</div><p class="task-detail-note">已保存的文件会自动跳过；取消本次任务不会移除更新计划。</p>`;}
-function taskCard(r){return `<article class="task-card ${esc(r.status)}"><span class="avatar task-icon">${icon('download')}</span><div class="task-info"><div class="task-header"><div class="task-author"><strong>@${esc(r.user)}</strong>${xLink(r.user,r.post_id)}</div>${taskBadge(r)}</div><div class="task-meta">${r.post_id?'单条帖子':'全部帖子'} · ${date(r.created)}${r.attempts>1?' · 第 '+r.attempts+' 次尝试':''}</div><p class="task-result">${esc(taskResult(r))}</p>${r.error?`<p class="error">${esc(r.error)}</p>`:''}<div class="task-card-bottom"><span class="task-meta">已有 ${r.archive_posts} 篇归档</span><div class="actions"><button class="text-button" data-action="task-select" data-id="${esc(r.id)}">查看详情</button>${taskActions(r)}</div></div></div></article>`;}
-function currentTaskPanel(){const r=taskItems.find(r=>r.status==='running');if(!r)return `<aside class="task-current-panel"><h2>本页正在保存</h2><p class="muted small">本页没有正在下载的任务。</p><p class="task-detail-note">单条帖子保存原文和媒体；博主任务保存全部可读取的内容。</p></aside>`;return `<aside class="task-current-panel"><h2>本页正在保存</h2><div class="task-detail-identity">${avatar(r.user)}<div><h3>@${esc(r.user)}</h3><span class="muted small">全部可读取的内容</span></div></div><div class="task-progress-counts"><div><strong>${r.scanned_posts||0}</strong><span>已读取帖子</span></div><div><strong>${r.progress||0}</strong><span>已保存媒体</span></div></div><p class="task-detail-note">长任务会持续更新归档，已保存的文件自动跳过。</p><button class="text-button" data-action="user" data-user="${esc(r.user)}">查看此博主归档</button></aside>`;}
+function taskDetails(r){return `<div class="task-detail-identity">${avatar(r.user)}<div><h3>@${esc(r.user)}</h3>${xLink(r.user,r.post_id)}<span class="muted small">${esc(taskScope(r))}</span></div></div><div class="task-detail-result">${taskBadge(r)}<p>${esc(taskResult(r))}</p>${taskCountSummary(r)?`<p>${esc(taskCountSummary(r))}</p>`:''}${r.error?`<p class="error">${esc(r.error)}</p>`:''}</div><dl class="task-detail-fields"><dt>添加时间</dt><dd>${date(r.created)}</dd><dt>开始时间</dt><dd>${r.started?date(r.started):'尚未开始'}</dd><dt>尝试次数</dt><dd>${r.attempts} 次</dd>${r.status==='retry'?`<dt>下次重试</dt><dd>${date(r.next_run)}</dd>`:''}${r.post_id?`<dt>帖子 ID</dt><dd>${esc(r.post_id)}</dd>`:''}<dt>已有归档</dt><dd>${r.archive_posts} 篇帖子</dd><dt>任务编号</dt><dd class="task-id">${esc(r.id)}</dd></dl><div class="actions">${taskActions(r)}</div><p class="task-detail-note">已保存的文件会自动跳过；取消本次任务不会移除更新计划。</p>`;}
+function taskCard(r){return `<article class="task-card ${esc(r.status)}"><span class="avatar task-icon">${icon('download')}</span><div class="task-info"><div class="task-header"><div class="task-author"><strong>@${esc(r.user)}</strong>${xLink(r.user,r.post_id)}</div>${taskBadge(r)}</div><div class="task-meta">${esc(taskScope(r))} · ${date(r.created)}${r.attempts>1?' · 第 '+r.attempts+' 次尝试':''}</div><p class="task-result">${esc(taskResult(r))}</p>${taskCountSummary(r)?`<p class="task-meta">${esc(taskCountSummary(r))}</p>`:''}${r.error?`<p class="error">${esc(r.error)}</p>`:''}<div class="task-card-bottom"><span class="task-meta">已有 ${r.archive_posts} 篇归档</span><div class="actions"><button class="text-button" data-action="task-select" data-id="${esc(r.id)}">查看详情</button>${taskActions(r)}</div></div></div></article>`;}
+function currentTaskPanel(){const r=taskItems.find(r=>r.status==='running');if(!r)return `<aside class="task-current-panel"><h2>本页正在保存</h2><p class="muted small">本页没有正在下载的任务。</p><p class="task-detail-note">历史补齐和增量更新独立排队；待确认历史不会拦住其他任务。</p></aside>`;return `<aside class="task-current-panel"><h2>本页正在保存</h2><div class="task-detail-identity">${avatar(r.user)}<div><h3>@${esc(r.user)}</h3><span class="muted small">${esc(taskScope(r))}</span></div></div><div class="task-progress-counts"><div><strong>${r.scanned_posts||0}</strong><span>已读取帖子</span></div><div><strong>${r.progress||0}</strong><span>已处理帖子</span></div></div><p class="task-detail-note">长任务会持续更新归档，已保存的文件自动跳过。</p><button class="text-button" data-action="user" data-user="${esc(r.user)}">查看此博主归档</button></aside>`;}
 function updateTaskControls(){
   const items=filteredTasks();selectedTask=selectedTaskId(items,selectedTask);$('page-title').textContent='下载任务';
-  const counts=taskCounts,labels={all:'全部',active:'进行中',attention:'需关注',done:'已完成'};
+  const counts=taskCounts,labels={all:'全部',active:'进行中',confirmation:'待确认',attention:'需关注',done:'已完成'};
   document.querySelectorAll('[data-action="task-filter"]').forEach(b=>{b.classList.toggle('active',b.dataset.filter===taskFilter);b.setAttribute('aria-pressed',String(b.dataset.filter===taskFilter));b.innerHTML=`${labels[b.dataset.filter]} <span>${counts[b.dataset.filter]}</span>`;});
   $('task-summary').innerHTML=Object.entries(counts).map(([key,count])=>`<div><strong>${taskLoadError?'—':count}</strong><span>${labels[key]}</span></div>`).join('');
   document.querySelectorAll('[data-action="task-bulk"]').forEach(button=>button.disabled=taskMutationBusy||!total||!!taskLoadError);
@@ -136,7 +141,7 @@ async function renderTasks(sequence,signal){
 async function renderBloggers(sequence=renderSequence,signal){
   const data=await api('/bloggers'+(state.featured?'?featured=true':''),'GET',undefined,signal);if(sequence!==renderSequence)return '';rows=new Map(data.items.map(b=>[b.user,b]));
   const tabs=`<div class="feed-tabs"><button data-action="all-bloggers" class="${!state.featured?'active':''}">全部博主</button><button data-action="pick-featured" class="${state.featured?'active':''}">精选博主</button></div>`;
-  if(!data.items.length)return tabs+empty(state.featured?'把喜欢的博主放在前面':'你的博主',state.featured?'在全部博主中点亮星标，下次就能快速找到。':'添加博主后会保存全部内容。',!state.featured);
+  if(!data.items.length)return tabs+empty(state.featured?'把喜欢的博主放在前面':'你的博主',state.featured?'在全部博主中点亮星标，下次就能快速找到。':'添加博主后会检查历史范围并建立更新计划。',!state.featured);
   return tabs+data.items.map(b=>`<article class="person-row">${avatar(b.user,b.display_name)}<div class="person-info"><div class="person-header"><h3>${esc(b.display_name||b.user)}</h3><button class="star-button icon-button ${b.featured?'selected':''}" data-action="feature-blogger" data-user="${esc(b.user)}" aria-label="${b.featured?'取消精选':'设为精选'} ${esc(b.user)}" aria-pressed="${!!b.featured}">${icon('star')}</button></div><span class="muted small">@${esc(b.user)} · ${b.post_count} 篇帖子</span>${b.note?`<p>${esc(b.note)}</p>`:''}<div class="actions"><button data-action="user" data-user="${esc(b.user)}">查看帖子</button><button class="quiet" data-action="download-user" data-user="${esc(b.user)}">立即更新</button><button class="quiet" data-action="plan-user" data-user="${esc(b.user)}">${b.schedule?(b.schedule==='daily'?'每天（旧计划）':cadence[b.schedule]):'设置更新'}</button><button class="quiet" data-action="edit-blogger" data-user="${esc(b.user)}">编辑</button></div></div></article>`).join('');
 }
 async function renderSubscriptions(sequence=renderSequence,signal){
@@ -177,10 +182,10 @@ async function showShare(id){
   if($('public-share-link'))$('public-share-link').onclick=event=>event.target.select();
 }
 function showAdd(){const schedule=settings.default_schedule||'quarterly';$('intake-schedule').innerHTML=scheduleOptions(schedule);$('intake-schedule').value=schedule;updateIntake();$('add-dialog').showModal();}
-function updateIntake(){const post=/\/status\/\d+/.test($('intake-url').value);$('intake-schedule-label').hidden=post;$('intake-hint').textContent=post?'保存这条帖子的原文和全部媒体。':'首次保存全部可读取的内容，已有文件自动跳过。本次升级将已有计划分散到未来三个月；新计划按所选周期在北京时间 08:00–18:00 随机开始。';}
+function updateIntake(){const post=/\/status\/\d+/.test($('intake-url').value);$('intake-schedule-label').hidden=post;$('intake-hint').textContent=post?'保存这条帖子的原文和全部媒体。':'先检查历史范围；超过 1000 条含媒体帖子时，需在下载页选择全部分批、最近 300 条或跳过。历史补齐和按计划增量更新独立排队，已有文件自动跳过。';}
 async function action(button){
   const{action:a,id,user,tag}=button.dataset;
-  if(a==='task-filter'){if(!['all','active','attention','done'].includes(button.dataset.filter))return;taskFilter=button.dataset.filter;return navigate('tasks');}
+  if(a==='task-filter'){if(!['all','active','confirmation','attention','done'].includes(button.dataset.filter))return;taskFilter=button.dataset.filter;return navigate('tasks');}
   if(a==='task-clear'){taskFilter='all';taskQuery='';return navigate('tasks');}
   if(a==='task-refresh')return route();
   if(a==='task-select'){const task=taskItems.find(r=>r.id===id);if(!task)return;if(!filteredTasks().some(r=>r.id===id)){taskFilter='all';taskQuery='';}selectedTask=id;renderTaskContent();$('task-dialog-content').innerHTML=taskDetails(task);$('task-dialog').showModal();return;}
@@ -198,6 +203,13 @@ async function action(button){
   if(a==='tag'){closeMedia();return navigate('archive',{tag});}
   if(a==='detail')return showDetail(id,Number(button.dataset.index)||0);
   if(a==='favorite'){const p=posts.get(id);await api('/posts/'+id,'PATCH',{favorite:!p.favorite});await route();return;}
+  if(a==='confirm-history'){
+    if(taskMutationBusy||!['all','recent300','skip'].includes(button.dataset.choice))return;
+    taskMutationBusy=true;updateTaskControls();
+    try{await api('/tasks/'+id+'/confirm','POST',{choice:button.dataset.choice});$('task-dialog').close();await navigate('tasks');await overview();toast(button.dataset.choice==='skip'?'已跳过历史，更新计划保留':'已加入下载队列');}
+    finally{taskMutationBusy=false;if(state.view==='tasks')updateTaskControls();}
+    return;
+  }
   if(['cancel','retry','delete','task-bulk'].includes(a)){
     if(taskMutationBusy)return;
     const operation=a==='task-bulk'?button.dataset.operation:a;
@@ -213,8 +225,8 @@ async function action(button){
     }finally{taskMutationBusy=false;if(state.view==='tasks')updateTaskControls();}
     return;
   }
-  if(a==='download-user'||a==='download-task'){const url=a==='download-user'?'@'+user:taskItems.find(r=>r.id===id)?.url;if(!url)throw Error('任务已变化，请刷新后重试。');await api('/tasks','POST',{url,mode:'download'});$('task-dialog').close();toast('已加入下载队列');await overview();if(['tasks','archive','favorites'].includes(state.view))await route();return;}
-  if(a==='plan-user'){const b=rows.get(user);showEdit('@'+user+' 的计划',`<label>什么时候更新<select id="edit-schedule">${scheduleOptions(b.schedule||settings.default_schedule)}</select></label><p class="muted small">下载全部内容，已有文件自动跳过。</p>`,()=>b.schedule?api('/subscriptions/'+user,'PATCH',{schedule:$('edit-schedule').value}):api('/tasks','POST',{url:'@'+user,schedule:$('edit-schedule').value}));return;}
+  if(a==='download-user'||a==='download-task'){const url=a==='download-user'?'@'+user:taskItems.find(r=>r.id===id)?.url;if(!url)throw Error('任务已变化，请刷新后重试。');await api('/tasks','POST',{url,mode:a==='download-user'?'update':'download'});$('task-dialog').close();toast('已加入下载队列');await overview();if(['tasks','archive','favorites'].includes(state.view))await route();return;}
+  if(a==='plan-user'){const b=rows.get(user);showEdit('@'+user+' 的计划',`<label>什么时候更新<select id="edit-schedule">${scheduleOptions(b.schedule||settings.default_schedule)}</select></label><p class="muted small">按计划增量更新；历史补齐单独排队，已有文件自动跳过。</p>`,()=>b.schedule?api('/subscriptions/'+user,'PATCH',{schedule:$('edit-schedule').value}):api('/tasks','POST',{url:'@'+user,schedule:$('edit-schedule').value}));return;}
   if(a==='delete-sub'){if(confirm('移除此计划？已保存的内容会保留。')){await api('/subscriptions/'+user,'DELETE');await route();}return;}
   if(a==='revoke-client'){if(confirm('撤销此连接凭据？')){await api('/clients/'+id,'DELETE');await route();}return;}
   if(a==='edit-post'){const p=posts.get(id);showEdit('编辑帖子',`<label>标签，用逗号分隔<input id="edit-tags" maxlength="500" value="${esc(p.tags)}"></label><label>备注<textarea id="edit-note" maxlength="4000">${esc(p.note)}</textarea></label>`,()=>api('/posts/'+id,'PATCH',{tags:$('edit-tags').value,note:$('edit-note').value}));return;}

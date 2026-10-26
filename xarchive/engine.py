@@ -10,7 +10,7 @@ from collections import deque
 from pathlib import Path
 
 from .library import index_folder
-from .worker import DownloadError, Interrupted
+from .worker import BatchComplete, DownloadError, HistoryConfirmation, Interrupted
 
 
 def parse_cookies(value):
@@ -85,39 +85,73 @@ class Engine:
 
     def __call__(self, task, interrupted, progress):
         settings = self.config(task)
+        smart = task.get('task_kind') in ('history', 'incremental')
+        if smart:
+            settings['_xarchive'] = {'root': str(self.store.root), 'task_id': task['id'], 'generation': task['generation']}
         if not settings['extractor']['twitter']['cookies']:
             raise DownloadError('尚未填写 X Cookie，请打开网站设置')
         fd, filename = tempfile.mkstemp(prefix='.run-', suffix='.json', dir=self.store.config)
         process = reader = None
-        lines, count, scanned = deque(maxlen=40), [0], [0]
+        lines = deque(maxlen=40)
+        count, scanned = [task.get('progress', 0) if smart else 0], [task.get('scanned_posts', 0) if smart else 0]
+        outcome, saved_ids, scanned_ids = {}, set(), set()
         timed_out = False
 
         def index_saved():
             with self.store.connect() as db:
                 posts, media = index_folder(self.store, task['user'], db=db)
-                db.execute('''UPDATE tasks SET new_posts=new_posts+?,new_media=new_media+?,scanned_posts=?
-                              WHERE id=? AND generation=?''', (posts, media, scanned[0], task['id'], task['generation']))
+                if smart:
+                    db.execute('''UPDATE tasks SET new_posts=new_posts+?,new_media=new_media+?
+                                  WHERE id=? AND generation=? AND status='running' ''',
+                               (posts, media, task['id'], task['generation']))
+                else:
+                    db.execute('''UPDATE tasks SET new_posts=new_posts+?,new_media=new_media+?,scanned_posts=?
+                                  WHERE id=? AND generation=?''',
+                               (posts, media, scanned[0], task['id'], task['generation']))
 
         try:
             with os.fdopen(fd, 'w', encoding='utf-8') as stream:
                 os.chmod(filename, 0o600)
                 json.dump(settings, stream)
             # Flush progress markers through the pipe while downloads are still running.
-            command = [sys.executable, '-u', '-m', 'xarchive.gallery_runner', '--config-ignore', '-c', filename,
-                       '--no-input', '--no-colors', '--windows-filenames',
-                       '--Print', 'after:XARCHIVE_SAVED ', '--Print', 'post:XARCHIVE_POST ']
-            if task['limit_count']:
-                command += ['--post-range', '1-' + str(task['limit_count'])]
-            command.append(task['url'])
+            command = [sys.executable, '-u', '-m', 'xarchive.gallery_runner']
+            if smart:
+                command += ['--smart', filename]
+            else:
+                command += ['--config-ignore', '-c', filename, '--no-input', '--no-colors', '--windows-filenames',
+                            '--Print', 'post-after:XARCHIVE_SAVED {tweet_id}', '--Print', 'post:XARCHIVE_POST {tweet_id}']
+                if task['limit_count']:
+                    command += ['--post-range', '1-' + str(task['limit_count'])]
+                command.append(task['url'])
             process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                        stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace')
 
             def read_output():
                 for line in iter(lambda: process.stdout.readline(8192), ''):
-                    if line.strip() == 'XARCHIVE_SAVED':
+                    value = line.strip()
+                    if value.startswith('XARCHIVE_EVENT '):
+                        try:
+                            event = json.loads(value[15:])
+                        except (ValueError, TypeError):
+                            continue
+                        if not isinstance(event, dict):
+                            continue
+                        if event.get('type') == 'progress':
+                            if type(event.get('completed')) is int and type(event.get('scanned')) is int:
+                                count[0], scanned[0] = max(0, event['completed']), max(0, event['scanned'])
+                        else:
+                            outcome.clear()
+                            outcome.update(event)
+                    elif value == 'XARCHIVE_SAVED':
                         count[0] += 1
-                    elif line.strip() == 'XARCHIVE_POST':
+                    elif value.startswith('XARCHIVE_SAVED ') and value[15:].isdigit():
+                        saved_ids.add(value[15:])
+                        count[0] = len(saved_ids)
+                    elif value == 'XARCHIVE_POST':
                         scanned[0] += 1
+                    elif value.startswith('XARCHIVE_POST ') and value[14:].isdigit():
+                        scanned_ids.add(value[14:])
+                        scanned[0] = len(scanned_ids)
                     else:
                         lines.append(line)
 
@@ -135,7 +169,9 @@ class Engine:
                     break
                 if (count[0], scanned[0]) != reported:
                     progress(count[0])
-                    self.store.execute('UPDATE tasks SET scanned_posts=? WHERE id=? AND generation=?', (scanned[0], task['id'], task['generation']))
+                    if not smart:
+                        self.store.execute('UPDATE tasks SET scanned_posts=? WHERE id=? AND generation=?',
+                                           (scanned[0], task['id'], task['generation']))
                     reported = (count[0], scanned[0])
                 if time.monotonic() - last_index >= 5:
                     index_saved()
@@ -147,12 +183,27 @@ class Engine:
             progress(count[0])
             if interrupted():
                 raise Interrupted()
+            if outcome.get('type') == 'rate_limit':
+                delay = outcome.get('retry_after')
+                raise DownloadError('X 请求限流，冷却后自动继续；已保存进度保留',
+                                    retry_after=delay if type(delay) is int and delay > 0 else 900,
+                                    cooldown_scope='task' if outcome.get('scope') == 'task' else 'shared')
+            if smart:
+                kind = outcome.get('type')
+                if kind == 'confirmation':
+                    raise HistoryConfirmation()
+                if kind == 'batch':
+                    raise BatchComplete()
+                if kind == 'interrupted':
+                    raise Interrupted()
+                if kind != 'completed' or process.returncode:
+                    raise DownloadError('读取或保存未完成，稍后从已确认进度重试')
             output = ''.join(lines)
             if rate_limited(output):
                 raise DownloadError('X 请求限流，15 分钟后自动重试', retry_after=900)
             if process.returncode:
                 raise DownloadError(classify_error(output, process.returncode))
-            if not scanned[0]:
+            if not smart and not scanned[0]:
                 raise DownloadError('没有读取到帖子。博主可能没有内容、访问受限，或 Cookie 已失效')
         finally:
             if process and process.poll() is None:

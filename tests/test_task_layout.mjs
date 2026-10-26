@@ -16,7 +16,7 @@ function harness(saved, denied=false) {
     setAttribute(name,value){this[name]=value;},showModal(){this.open=true;},close(){this.open=false;}});
   const node = id => {if(!nodes.has(id))nodes.set(id,element());return nodes.get(id);};
   const layouts = ['a','b'].map(layout=>element({layout}));
-  const filters = ['all','active','attention','done'].map(filter=>element({filter}));
+  const filters = ['all','active','confirmation','attention','done'].map(filter=>element({filter}));
   const sandbox = {console,URLSearchParams,Map,Set,Date,Number,String,Object,Math,AbortController,
     document:{hidden:false,getElementById:node,addEventListener(type,listener){listeners.set(type,listener);},querySelector(){return null;},querySelectorAll(selector){return selector==='[data-action="task-layout"]'?layouts:selector==='[data-action="task-filter"]'?filters:[];}},
     localStorage:{getItem(key){if(denied)throw Error('unavailable');return values.get(key);},setItem(key,value){if(denied)throw Error('unavailable');values.set(key,value);}},
@@ -34,7 +34,7 @@ function harness(saved, denied=false) {
       if(path.startsWith('/tasks?')){
         const params=new URLSearchParams(path.split('?')[1]),query=(params.get('q')||'').toLowerCase();
         const matches=fixture.filter(row=>(row.user+' '+(row.post_id||'')+' '+row.id).includes(query));
-        const groups={all:matches,active:matches.filter(row=>['queued','running','retry'].includes(row.status)),attention:matches.filter(row=>['failed','retry'].includes(row.status)),done:matches.filter(row=>row.status==='succeeded')};
+        const groups={all:matches,active:matches.filter(row=>['queued','running','retry'].includes(row.status)),confirmation:matches.filter(row=>row.status==='awaiting_confirmation'),attention:matches.filter(row=>['failed','retry','awaiting_confirmation'].includes(row.status)),done:matches.filter(row=>row.status==='succeeded')};
         const items=groups[params.get('filter')||'all'];
         return {items,total:items.length,counts:Object.fromEntries(Object.entries(groups).map(([key,rows])=>[key,rows.length]))};
       }
@@ -170,13 +170,14 @@ await app.run(`action({dataset:{action:'download-user',user:'spacex'}})`);
 const submit=app.calls.find(call=>call.method==='POST');
 assert.equal(submit.path,'/tasks');
 assert.equal(submit.body.url,'@spacex');
-assert.equal(submit.body.mode,'download');
+assert.equal(submit.body.mode,'update','Immediate updates must not return the waiting history task');
 
 app.run(`taskItems=[{id:'single-post',user:'example',post_id:'123',url:'https://x.com/example/status/123',status:'succeeded'}]`);
 assert.match(app.run(`taskActions(taskItems[0])`),/data-action="download-task"/);
 app.calls.length=0;
 await app.run(`action({dataset:{action:'download-task',id:'single-post'}})`);
 assert.equal(app.calls.find(call=>call.method==='POST').body.url,'https://x.com/example/status/123','Checking one post must keep the original target');
+assert.equal(app.calls.find(call=>call.method==='POST').body.mode,'download','Checking a saved task preserves the existing download intake');
 
 app.run(`state={view:'settings',section:'updates'};api=async()=>({proxy_configured:true,default_schedule:'monthly'})`);
 assert.match(await app.run('renderSettings()'),/id="proxy"/);
@@ -217,7 +218,7 @@ for(const view of ['archive','favorites','bloggers','subscriptions','tasks','set
   assert.equal(new URLSearchParams(unified.context.location.search).get('view'),null,'Every global search must open the shared archive results');
   assert.equal(new URLSearchParams(unified.context.location.search).get('q'),'@example');
   assert.match(unified.node('content').innerHTML,/Example Summary/);
-  assert.match(unified.node('content').innerHTML,/最近完整更新/);
+  assert.match(unified.node('content').innerHTML,/最近成功更新/);
   assert.match(unified.node('content').innerHTML,/内容收录到/);
   assert.match(unified.node('content').innerHTML,/每季度一次/);
   assert.match(unified.node('content').innerHTML,/data-action="plan-user"/);
@@ -243,4 +244,27 @@ assert.doesNotMatch(onceSummary,/未设计划/,'A once plan is present even thou
 const draftSearch=harness();await draftSearch.run('route()');draftSearch.node('search').value='@draft';
 await draftSearch.intervals[0]();
 assert.equal(draftSearch.node('search').value,'@draft','Background task refresh must not erase an unsubmitted global search');
-console.log('Task cards, global author search, X diagnostics, queue cooldown, bulk actions and race-safe navigation passed.');
+const history=harness();
+history.run(`pendingTask={...fixture[1],id:'history-id',status:'awaiting_confirmation',task_kind:'history',total_posts:null,media_posts:1001,media_complete:false};taskItems=[pendingTask];taskFilter='all';taskQuery='';`);
+const historyCard=history.run('taskCard(pendingTask)');
+assert.match(historyCard,/待确认/);
+assert.match(historyCard,/总帖数未知/);
+assert.match(historyCard,/至少 1001 条含媒体帖子/);
+for(const choice of ['all','recent300','skip'])assert.match(historyCard,new RegExp('data-choice="'+choice+'"'));
+assert.doesNotMatch(history.run('taskActions(pendingTask)'),/data-action="delete"/,'Pending history must be cancelled before deleting');
+history.run(`pendingTask.media_complete=true;pendingTask.total_posts=2048;`);
+assert.match(history.run('taskCard(pendingTask)'),/X 显示 2048 条帖子/);
+assert.match(history.run('taskCard(pendingTask)'),/已发现 1001 条含媒体帖子/);
+assert.doesNotMatch(history.run('taskCard(pendingTask)'),/至少 1001/,'An exhausted media scan has an exact count');
+history.run(`taskFilter='confirmation'`);
+assert.equal(history.run('filteredTasks().length'),1);
+await history.run(`action({dataset:{action:'confirm-history',id:'history-id',choice:'recent300'}})`);
+const confirmed=history.calls.find(call=>call.path==='/tasks/history-id/confirm');
+assert.equal(confirmed.method,'POST');assert.equal(confirmed.body.choice,'recent300');
+assert.match(history.run(`taskCard({...fixture[0],task_kind:'incremental'})`),/增量更新/);
+assert.match(history.run(`taskCard({...fixture[0],task_kind:'history',history_choice:'recent300'})`),/最近 300 条/);
+assert.doesNotMatch(history.run(`taskActions({...fixture[1],status:'cancelled',history_choice:'skip'})`),/data-action="retry"/,'Skipped history must not silently resume through retry');
+assert.match(history.run(`taskResult({...fixture[0],progress:12})`),/已处理 12 条帖子/,'Progress counts posts, not media files');
+history.run('taskCooldownUntil=0');
+assert.match(history.run(`taskResult({status:'retry',cooldown_scope:'task',cooldown_reason:'查询额度等待',next_run:Date.now()/1000+1800})`),/仅此任务/);
+console.log('Task cards, history confirmation, count bounds, global author search, X diagnostics, queue cooldown, bulk actions and race-safe navigation passed.');

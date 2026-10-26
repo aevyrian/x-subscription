@@ -32,6 +32,7 @@ class EngineReliabilityTests(unittest.TestCase):
         self.store = Store(Path(self.tmp.name) / 'data')
         self.store.set_setting('x_cookies', {'auth_token': 'test-only'})
         self.job, _ = self.store.submit('example')
+        self.job['task_kind'] = 'legacy'
         self.engine = Engine(self.store)
 
     def completed_process(self, output):

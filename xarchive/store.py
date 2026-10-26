@@ -15,7 +15,8 @@ RESERVED = set('home explore search settings i notifications messages compose in
 ACTIVE = ('queued', 'running', 'retry')
 SCHEDULES = ('once', 'daily', 'three_days', 'weekly', 'monthly', 'quarterly', 'yearly')
 LOCAL_TIME = timezone(timedelta(hours=8))
-TASK_FILTERS = {'all': (), 'active': ACTIVE, 'attention': ('failed', 'retry'), 'done': ('succeeded',)}
+TASK_FILTERS = {'all': (), 'active': ACTIVE, 'attention': ('failed', 'retry', 'awaiting_confirmation'),
+                'done': ('succeeded',), 'confirmation': ('awaiting_confirmation',)}
 
 
 def in_update_window(timestamp):
@@ -170,6 +171,25 @@ class Store:
                 db.execute('ALTER TABLE tasks ADD COLUMN scanned_posts INTEGER NOT NULL DEFAULT 0')
             if 'generation' not in {r['name'] for r in db.execute('PRAGMA table_info(tasks)')}:
                 db.execute('ALTER TABLE tasks ADD COLUMN generation INTEGER NOT NULL DEFAULT 0')
+            task_columns = {r['name'] for r in db.execute('PRAGMA table_info(tasks)')}
+            for name, declaration in (
+                ('task_kind', "TEXT NOT NULL DEFAULT 'legacy'"), ('crawl_mode', "TEXT NOT NULL DEFAULT 'auto'"),
+                ('history_choice', "TEXT NOT NULL DEFAULT ''"), ('total_posts', 'INTEGER'),
+                ('media_posts', 'INTEGER NOT NULL DEFAULT 0'), ('media_complete', 'INTEGER NOT NULL DEFAULT 0'),
+                ('probe_complete', 'INTEGER NOT NULL DEFAULT 0'), ('cursor', 'TEXT'), ('since_id', 'TEXT'),
+                ('cooldown_scope', "TEXT NOT NULL DEFAULT ''"), ('cooldown_reason', "TEXT NOT NULL DEFAULT ''"),
+                ('cooldown_until', 'REAL NOT NULL DEFAULT 0')):
+                if name not in task_columns:
+                    db.execute(f'ALTER TABLE tasks ADD COLUMN {name} {declaration}')
+            if 'task_kind' not in task_columns:
+                db.execute('DROP INDEX tasks_active')
+                db.execute("""CREATE UNIQUE INDEX tasks_active ON tasks(url,task_kind)
+                              WHERE status IN ('queued','running','retry','awaiting_confirmation')""")
+            db.execute('''CREATE TABLE IF NOT EXISTS crawl_posts (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                tweet_id TEXT NOT NULL, payload TEXT NOT NULL, has_media INTEGER NOT NULL,
+                completed INTEGER NOT NULL DEFAULT 0, UNIQUE(task_id,tweet_id))''')
             blogger_columns = {r['name'] for r in db.execute('PRAGMA table_info(bloggers)')}
             for name, declaration in (('avatar_url', "TEXT NOT NULL DEFAULT ''"), ('featured', 'INTEGER NOT NULL DEFAULT 0')):
                 if name not in blogger_columns:
@@ -178,6 +198,9 @@ class Store:
                 db.execute('ALTER TABLE bloggers ADD COLUMN last_success_at REAL')
                 db.execute("""UPDATE bloggers SET last_success_at=(SELECT MAX(t.finished) FROM tasks t
                               WHERE t.user=bloggers.user AND t.post_id IS NULL AND t.status='succeeded')""")
+            for name, declaration in (('history_status', "TEXT NOT NULL DEFAULT 'legacy'"), ('high_water_id', 'TEXT')):
+                if name not in blogger_columns:
+                    db.execute(f'ALTER TABLE bloggers ADD COLUMN {name} {declaration}')
             if not db.execute("SELECT 1 FROM settings WHERE key='all_downloads_v2'").fetchone():
                 db.execute("INSERT INTO settings VALUES ('all_downloads_v2','true')")
                 db.execute("INSERT INTO settings VALUES ('timeout_minutes','0') ON CONFLICT(key) DO UPDATE SET value='0'")
@@ -230,7 +253,7 @@ class Store:
         return int(json.loads(row['value'])) if row else 0
 
     def add_blogger(self, user, db):
-        db.execute('INSERT OR IGNORE INTO bloggers(user,created) VALUES (?,?)', (user, time.time()))
+        db.execute("INSERT OR IGNORE INTO bloggers(user,created,history_status) VALUES (?,?,'new')", (user, time.time()))
 
     def submit(self, value, limit=0, source='website', db=None):
         parsed = target(value)
@@ -240,18 +263,29 @@ class Store:
             with self.connect() as connection:
                 connection.execute('BEGIN IMMEDIATE')
                 return self.submit(value, limit, source, connection)
-        existing = db.execute("SELECT * FROM tasks WHERE user=? AND post_id IS ? AND status IN ('queued','running','retry')",
-                              (parsed['user'], parsed['post_id'])).fetchone()
+        self.add_blogger(parsed['user'], db)
+        blogger = db.execute('SELECT * FROM bloggers WHERE user=?', (parsed['user'],)).fetchone()
+        has_history = db.execute("SELECT 1 FROM tasks WHERE user=? AND task_kind='history' LIMIT 1", (parsed['user'],)).fetchone()
+        kind = 'single' if parsed['post_id'] else 'incremental' if blogger['history_status'] != 'new' or source in ('scheduled', 'update') and has_history else 'history'
+        existing = db.execute("""SELECT * FROM tasks WHERE user=? AND post_id IS ?
+                              AND (task_kind=? OR task_kind='legacy')
+                              AND status IN ('queued','running','retry','awaiting_confirmation')""",
+                              (parsed['user'], parsed['post_id'], kind)).fetchone()
         if existing:
             if source != 'scheduled' and existing['source'] == 'scheduled' and existing['status'] in ('queued', 'retry'):
                 db.execute('UPDATE tasks SET source=?,next_run=? WHERE id=?', (source, time.time(), existing['id']))
                 existing = db.execute('SELECT * FROM tasks WHERE id=?', (existing['id'],)).fetchone()
             return dict(existing), True
-        self.add_blogger(parsed['user'], db)
         identifier, now = uuid.uuid4().hex, time.time()
-        db.execute('''INSERT INTO tasks(id,user,post_id,url,limit_count,source,next_run,created)
-                      VALUES (?,?,?,?,?,?,?,?)''',
-                   (identifier, parsed['user'], parsed['post_id'], parsed['url'], limit, source, now, now))
+        since_id = None
+        if kind == 'incremental':
+            latest = db.execute('SELECT id FROM posts WHERE user=? ORDER BY LENGTH(id) DESC,id DESC LIMIT 1', (parsed['user'],)).fetchone()
+            since_id = blogger['high_water_id'] or (latest['id'] if latest else str(max(0, int((blogger['created'] * 1000 - 1288834974657))) << 22))
+            # Partial downloads must not move the next task past unfinished tweets.
+            db.execute('UPDATE bloggers SET high_water_id=COALESCE(high_water_id,?) WHERE user=?', (since_id, parsed['user']))
+        db.execute('''INSERT INTO tasks(id,user,post_id,url,limit_count,source,next_run,created,task_kind,since_id)
+                      VALUES (?,?,?,?,?,?,?,?,?,?)''',
+                   (identifier, parsed['user'], parsed['post_id'], parsed['url'], limit, source, now, now, kind, since_id))
         return dict(db.execute('SELECT * FROM tasks WHERE id=?', (identifier,)).fetchone()), False
 
     def subscribe(self, value, schedule='quarterly'):
@@ -326,11 +360,13 @@ class Store:
             dispatch = db.execute("SELECT value FROM settings WHERE key='scheduled_claim_after'").fetchone()
             automatic_allowed = in_update_window(now) and (not dispatch or json.loads(dispatch['value']) <= now)
             row = db.execute("""SELECT * FROM tasks WHERE status IN ('queued','retry') AND next_run<=?
-                                AND (source!='scheduled' OR ?) ORDER BY created LIMIT 1""", (now, automatic_allowed)).fetchone()
+                                AND cooldown_until<=? AND (source!='scheduled' OR ?)
+                                ORDER BY CASE task_kind WHEN 'incremental' THEN 0 WHEN 'single' THEN 1 ELSE 2 END,
+                                next_run,created LIMIT 1""", (now, now, automatic_allowed)).fetchone()
             if not row:
                 return None
             db.execute("""UPDATE tasks SET status='running',attempts=attempts+1,generation=generation+1,started=?,
-                          finished=NULL,error=NULL,progress=0 WHERE id=?""", (now, row['id']))
+                          finished=NULL,error=NULL WHERE id=?""", (now, row['id']))
             if row['source'] == 'scheduled':
                 db.execute("INSERT INTO settings VALUES ('scheduled_claim_after',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                            (json.dumps(now + random.randint(15, 30) * 60),))
@@ -340,7 +376,23 @@ class Store:
 
     def cancel(self, identifier):
         return self.execute("""UPDATE tasks SET status='cancelled',finished=?
-                              WHERE id=? AND status IN ('queued','running','retry','failed')""", (time.time(), identifier))
+                              WHERE id=? AND status IN ('queued','running','retry','failed','awaiting_confirmation')""", (time.time(), identifier))
+
+    def confirm_history(self, identifier, choice):
+        if choice not in ('all', 'recent300', 'skip'):
+            raise ValueError('无效的历史抓取选择')
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute("SELECT * FROM tasks WHERE id=? AND status='awaiting_confirmation' AND task_kind='history'", (identifier,)).fetchone()
+            if not row:
+                raise ValueError('任务不存在或已不再等待确认')
+            now = time.time()
+            db.execute('''UPDATE tasks SET history_choice=?,status=?,next_run=?,finished=?,error=NULL
+                          WHERE id=?''', (choice, 'cancelled' if choice == 'skip' else 'queued',
+                                          max(now, row['cooldown_until']), now if choice == 'skip' else None, identifier))
+            if choice == 'skip':
+                db.execute("UPDATE bloggers SET history_status='skipped' WHERE user=?", (row['user'],))
+            return dict(db.execute('SELECT * FROM tasks WHERE id=?', (identifier,)).fetchone())
 
     def retry(self, identifier):
         with self.connect() as db:
@@ -352,10 +404,13 @@ class Store:
                 raise ValueError('该对象已有活动任务')
 
     def _retry_task(self, db, row):
-        if db.execute("SELECT 1 FROM tasks WHERE url=? AND id!=? AND status IN ('queued','running','retry')", (row['url'], row['id'])).fetchone():
+        if row['task_kind'] == 'history' and (row['history_choice'] == 'skip' or row['media_posts'] > 1000 and not row['history_choice']):
+            return 0
+        if db.execute("""SELECT 1 FROM tasks WHERE url=? AND (task_kind=? OR task_kind='legacy' OR ?='legacy') AND id!=?
+                       AND status IN ('queued','running','retry','awaiting_confirmation')""", (row['url'], row['task_kind'], row['task_kind'], row['id'])).fetchone():
             return 0
         return db.execute("""UPDATE tasks SET status='queued',source='website',attempts=0,next_run=?,finished=NULL,
-                            started=NULL,error=NULL WHERE id=?""", (time.time(), row['id'])).rowcount
+                            started=NULL,error=NULL WHERE id=?""", (max(time.time(), row['cooldown_until']), row['id'])).rowcount
 
     def delete_task(self, identifier):
         with self.connect() as db:
@@ -391,7 +446,7 @@ class Store:
             rows = db.execute('SELECT * FROM tasks' + where + ' ORDER BY created DESC,id DESC', args).fetchall()
             affected = 0
             for row in rows:
-                if action == 'cancel' and row['status'] in (*ACTIVE, 'failed'):
+                if action == 'cancel' and row['status'] in (*ACTIVE, 'failed', 'awaiting_confirmation'):
                     affected += db.execute("UPDATE tasks SET status='cancelled',finished=? WHERE id=?", (time.time(), row['id'])).rowcount
                 elif action == 'retry' and row['status'] in ('failed', 'cancelled', 'retry'):
                     affected += self._retry_task(db, row)
@@ -400,7 +455,7 @@ class Store:
                     affected += db.execute('DELETE FROM tasks WHERE id=?', (row['id'],)).rowcount
             return {'affected': affected, 'skipped': len(rows) - affected, 'matched': len(rows)}
 
-    def finish(self, task, result=None, error=None, retry_after=None):
+    def finish(self, task, result=None, error=None, retry_after=None, cooldown_scope='shared'):
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             now = time.time()
@@ -415,11 +470,13 @@ class Store:
                 due = now + delay
                 if task['source'] == 'scheduled':
                     due = next_work_window(due)
-                db.execute('''UPDATE tasks SET status=?,error=?,attempts=MAX(attempts-?,0),next_run=?,finished=?
+                db.execute('''UPDATE tasks SET status=?,error=?,attempts=MAX(attempts-?,0),next_run=?,finished=?,
+                              cooldown_scope=?,cooldown_reason=?,cooldown_until=?
                               WHERE id=? AND status='running' AND generation=? ''',
                            (status, error, int(limited), due,
-                            now, task['id'], task['generation']))
-                if limited and same_account:
+                            now, cooldown_scope if limited else '', error if limited else '',
+                            now + delay if limited and same_account else 0, task['id'], task['generation']))
+                if limited and same_account and cooldown_scope != 'task':
                     until = max(self._cooldown_until(db), now + delay)
                     db.execute("INSERT INTO settings VALUES ('x_rate_limit_until',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                                (json.dumps(until),))
@@ -430,3 +487,12 @@ class Store:
                            (posts, media, now, task['id'], task['generation'])).rowcount
                 if changed and task['post_id'] is None:
                     db.execute('UPDATE bloggers SET last_success_at=? WHERE user=?', (now, task['user']))
+                    current = db.execute('SELECT * FROM tasks WHERE id=?', (task['id'],)).fetchone()
+                    if current['task_kind'] == 'history':
+                        db.execute('UPDATE bloggers SET history_status=? WHERE user=?',
+                                   ('recent300' if current['history_choice'] == 'recent300' else 'complete', task['user']))
+                    newest = db.execute('SELECT tweet_id FROM crawl_posts WHERE task_id=? AND completed=1 ORDER BY LENGTH(tweet_id) DESC,tweet_id DESC LIMIT 1', (task['id'],)).fetchone()
+                    if newest:
+                        old = db.execute('SELECT high_water_id FROM bloggers WHERE user=?', (task['user'],)).fetchone()['high_water_id']
+                        if old is None or int(newest['tweet_id']) > int(old):
+                            db.execute('UPDATE bloggers SET high_water_id=? WHERE user=?', (newest['tweet_id'], task['user']))

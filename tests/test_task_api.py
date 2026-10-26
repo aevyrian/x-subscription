@@ -84,6 +84,64 @@ class TaskApiTests(unittest.TestCase):
         self.assertEqual(self.client.post('/api/v1/tasks/bulk', json={**body, 'q': 'x' * 201}).status_code, 422)
         self.assertEqual(self.client.get('/api/v1/tasks?filter=bad').status_code, 422)
 
+    def test_history_confirmation_accepts_only_website_choices_once(self):
+        for choice in ('all', 'recent300', 'skip'):
+            task, _ = self.store.submit('hist' + choice)
+            self.store.execute("UPDATE tasks SET status='awaiting_confirmation' WHERE id=?", (task['id'],))
+            path = '/api/v1/tasks/' + task['id'] + '/confirm'
+            pending = self.client.get('/api/v1/tasks?filter=confirmation').json()
+            self.assertEqual(pending['counts']['confirmation'], 1)
+            self.assertEqual(pending['items'][0]['id'], task['id'])
+            self.assertEqual(self.client.get('/api/v1/stats').json()['confirmation_tasks'], 1)
+            self.assertEqual(self.client.post('/api/v1/tasks/' + task['id'] + '/delete').status_code, 409)
+            response = self.client.post(path, json={'choice': choice})
+            self.assertEqual(response.status_code, 200, choice)
+            row = self.store.query('SELECT * FROM tasks WHERE id=?', (task['id'],))[0]
+            self.assertEqual(row['history_choice'], choice)
+            self.assertEqual(row['status'], 'cancelled' if choice == 'skip' else 'queued')
+            self.assertEqual(self.client.post(path, json={'choice': choice}).status_code, 409)
+
+    def test_history_confirmation_requires_admin_and_validated_choice(self):
+        task, _ = self.store.submit('example')
+        self.store.execute("UPDATE tasks SET status='awaiting_confirmation' WHERE id=?", (task['id'],))
+        path = '/api/v1/tasks/' + task['id'] + '/confirm'
+        self.assertEqual(self.client.post(path, json={'choice': 'arbitrary'}).status_code, 422)
+        self.assertEqual(self.client.post(path, json={'choice': 'all', 'limit': 500}).status_code, 422)
+        token = self.client.post('/api/v1/clients', json={'name': 'test'}).json()['token']
+        self.client.cookies.clear()
+        self.assertEqual(self.client.post(path, json={'choice': 'all'}).status_code, 401)
+        self.assertEqual(self.client.post(path, json={'choice': 'all'}, headers={'Authorization': 'Bearer ' + token}).status_code, 403)
+
+    def test_manual_update_queues_incremental_beside_waiting_history(self):
+        history, _ = self.store.submit('example')
+        self.store.execute("UPDATE tasks SET status='awaiting_confirmation' WHERE id=?", (history['id'],))
+        same = self.client.post('/api/v1/tasks', json={'url': '@example', 'mode': 'download'})
+        self.assertEqual(same.status_code, 200)
+        self.assertEqual(same.json()['task']['id'], history['id'])
+        update = self.client.post('/api/v1/tasks', json={'url': '@example', 'mode': 'update'})
+        self.assertEqual(update.status_code, 200)
+        self.assertEqual(update.json()['task']['task_kind'], 'incremental')
+        self.assertNotEqual(update.json()['task']['id'], history['id'])
+        self.assertEqual(self.store.query('SELECT status FROM tasks WHERE id=?', (history['id'],))[0]['status'], 'awaiting_confirmation')
+        first = self.client.post('/api/v1/tasks', json={'url': '@firstupdate', 'mode': 'update'})
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json()['task']['task_kind'], 'history')
+
+    def test_cookie_reset_clears_only_shared_task_cooldown(self):
+        import time
+        shared, _ = self.store.submit('sharedwait')
+        local, _ = self.store.submit('querywait')
+        later = time.time() + 900
+        for task, scope in ((shared, 'shared'), (local, 'task')):
+            self.store.execute("UPDATE tasks SET status='retry',next_run=?,cooldown_until=?,cooldown_scope=?,cooldown_reason='等待额度' WHERE id=?", (later, later, scope, task['id']))
+        self.store.set_setting('x_rate_limit_until', later)
+        self.assertEqual(self.client.put('/api/v1/settings', json={'clear_cookies': True}).status_code, 200)
+        rows = {row['id']: row for row in self.store.query('SELECT * FROM tasks')}
+        self.assertEqual(rows[shared['id']]['cooldown_until'], 0)
+        self.assertLess(rows[shared['id']]['next_run'], time.time() + 5)
+        self.assertEqual(rows[local['id']]['cooldown_until'], later)
+        self.assertEqual(rows[local['id']]['next_run'], later)
+
 
 if __name__ == '__main__':
     unittest.main()
