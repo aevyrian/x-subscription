@@ -44,11 +44,52 @@ class SmartStoreTests(unittest.TestCase):
         self.assertEqual(history['task_kind'], 'history')
         self.assertNotEqual(single['id'], history['id'])
 
+    def test_first_legacy_subscription_runs_history_once(self):
+        self.store.execute("INSERT INTO bloggers(user,created,history_status) VALUES ('existing',0,'legacy')")
+        self.store.execute("INSERT INTO posts(id,user,url,added) VALUES ('100','existing','fixture',0)")
+        before = time.time()
+        history, duplicate = self.store.subscribe('existing')
+        self.assertFalse(duplicate)
+        self.assertEqual((history['task_kind'], history['status'], history['limit_count']), ('history', 'queued', 0))
+        self.assertIsNone(history['since_id'])
+        self.assertEqual(history['history_choice'], '')
+        self.assertGreaterEqual(history['next_run'], before)
+        self.assertLessEqual(history['next_run'], time.time())
+        same, duplicate = self.store.subscribe('existing')
+        self.assertTrue(duplicate)
+        self.assertEqual(same['id'], history['id'])
+        claimed = self.store.claim()
+        self.assertEqual(claimed['id'], history['id'])
+        self.store.finish(claimed)
+        incremental, duplicate = self.store.subscribe('existing')
+        self.assertFalse(duplicate)
+        self.assertEqual((incremental['task_kind'], incremental['since_id']), ('incremental', '100'))
+        self.assertEqual(self.store.query("SELECT COUNT(*) n FROM tasks WHERE task_kind='history'")[0]['n'], 1)
+        self.assertEqual(self.store.query('SELECT id FROM posts'), [{'id': '100'}])
+
+    def test_existing_legacy_subscription_stays_incremental(self):
+        self.store.execute("INSERT INTO bloggers(user,created,history_status) VALUES ('existing',0,'legacy')")
+        self.store.execute("INSERT INTO subscriptions(user,next_run) VALUES ('existing',9999999999)")
+        task, _ = self.store.subscribe('existing')
+        self.assertEqual(task['task_kind'], 'incremental')
+        self.assertEqual(self.store.query('SELECT history_status FROM bloggers')[0]['history_status'], 'legacy')
+
+    def test_first_subscription_keeps_explicit_history_decisions(self):
+        for state in ('complete', 'recent300', 'skipped'):
+            with self.subTest(state=state):
+                self.store.execute('INSERT INTO bloggers(user,created,history_status) VALUES (?,0,?)', (state, state))
+                task, _ = self.store.subscribe(state)
+                self.assertEqual(task['task_kind'], 'incremental')
+                self.assertEqual(self.store.query('SELECT history_status FROM bloggers WHERE user=?', (state,))[0]['history_status'], state)
+
     def test_confirmation_cannot_be_bypassed_by_intake_retry_or_restart(self):
         task = self.awaiting()
         same, duplicate = self.store.submit('example')
         self.assertTrue(duplicate)
         self.assertEqual(same['id'], task['id'])
+        same, duplicate = self.store.subscribe('example')
+        self.assertTrue(duplicate)
+        self.assertEqual((same['id'], same['status']), (task['id'], 'awaiting_confirmation'))
         with self.assertRaises(ValueError):
             self.store.retry(task['id'])
         self.assertEqual(self.store.bulk_tasks('retry')['affected'], 0)

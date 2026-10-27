@@ -295,6 +295,8 @@ class Store:
         due = next_update(schedule)
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
+            db.execute("""UPDATE bloggers SET history_status='new' WHERE user=? AND history_status='legacy'
+                          AND NOT EXISTS (SELECT 1 FROM subscriptions WHERE user=bloggers.user)""", (parsed['user'],))
             task, duplicate = self.submit(parsed['url'], 0, 'subscription', db)
             db.execute('''INSERT INTO subscriptions(user,enabled,limit_count,next_run,last_task,schedule)
                           VALUES (?,?,?,?,?,?) ON CONFLICT(user) DO UPDATE SET enabled=excluded.enabled,
