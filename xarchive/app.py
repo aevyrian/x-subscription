@@ -331,6 +331,28 @@ def create_app(data_dir=None, run_worker=True, runner=None):
     def bloggers(featured: bool = False, q: str = Query(default='', max_length=200), user: str = '', _=Depends(admin)):
         return list_bloggers(store, q=q, user=user, featured=featured)
 
+    @app.get('/api/v1/scriptcat/bloggers/{user}')
+    def scriptcat_blogger(user: str, _=Depends(identity)):
+        if not re.fullmatch(r'[A-Za-z0-9_]{1,15}', user):
+            raise ValueError('请输入有效的 X 博主账号')
+        user = target(user)['user']
+        rows = store.query('''SELECT b.display_name,b.last_success_at,s.enabled,s.schedule,s.next_run,
+                              t.status active_status,t.task_kind active_kind,t.next_run active_next_run
+                              FROM bloggers b LEFT JOIN subscriptions s ON s.user=b.user
+                              LEFT JOIN tasks t ON t.id=(SELECT id FROM tasks WHERE user=b.user AND post_id IS NULL
+                                  AND status IN ('queued','running','retry','awaiting_confirmation')
+                                  ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 WHEN 'retry' THEN 2 ELSE 3 END,created,id LIMIT 1)
+                              WHERE b.user=?''', (user,))
+        row = rows[0] if rows else None
+        subscription = ({'enabled': bool(row['enabled']), 'schedule': row['schedule'],
+                         'next_run': row['next_run'] if row['enabled'] and row['schedule'] != 'once' else None}
+                        if row and row['schedule'] is not None else None)
+        active = ({'status': row['active_status'], 'task_kind': row['active_kind'], 'next_run': row['active_next_run']}
+                  if row and row['active_status'] else None)
+        return {'user': user, 'display_name': (row['display_name'] or user) if row else None,
+                'subscription': subscription, 'last_success_at': row['last_success_at'] if row else None,
+                'active_task': active}
+
     @app.patch('/api/v1/bloggers/{user}')
     def edit_blogger(user: str, body: BloggerEdit, _=Depends(admin)):
         fields = body.model_dump(exclude_none=True)

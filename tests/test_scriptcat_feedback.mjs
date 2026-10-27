@@ -4,7 +4,7 @@ import vm from 'node:vm';
 
 const source=fs.readFileSync(new URL('../xarchive/integration/xarchive.user.js',import.meta.url),'utf8');
 function harness(resume=false,server='https://archive.test',schedule,migrated=false) {
-  const nodes=new Map(), requests=[], timers=new Map(), intervals=[], renderedIds=new Set(), opened=[], listeners=new Map(), values=new Map([['server',server],['token','test-only']]);
+  const nodes=new Map(), requests=[], lookups=[], timers=new Map(), intervals=[], renderedIds=new Set(), opened=[], listeners=new Map(), values=new Map([['server',server],['token','test-only']]);
   if(resume)values.set('activeTask',{server,id:'job'});
   if(schedule!==undefined)values.set('schedule',schedule);
   if(migrated)values.set('quarterlyDefaultV1',true);
@@ -22,14 +22,15 @@ function harness(resume=false,server='https://archive.test',schedule,migrated=fa
     URL,TextEncoder,btoa:value=>Buffer.from(value,'binary').toString('base64'),
     Date:class extends Date{static now(){return now;}},
     GM_getValue:(key,fallback)=>values.get(key)??fallback,GM_setValue:(key,value)=>values.set(key,value),GM_registerMenuCommand(){},GM_openInTab:(...args)=>opened.push(args),
-    GM_xmlhttpRequest:options=>requests.push(options),
+    GM_xmlhttpRequest:options=>(options.url.includes('/scriptcat/bloggers/')?lookups:requests).push(options),
     setInterval:fn=>intervals.push(fn),clearInterval(){},setTimeout:(fn,delay)=>{timers.set(++serial,{fn,delay});return serial;},clearTimeout:id=>timers.delete(id)};
   vm.runInNewContext(source,context);
   const reply=(index,data,status=200)=>requests[index].onload({status,responseText:JSON.stringify(data)});
+  const replyLookup=(index,data,status=200)=>lookups[index].onload({status,responseText:JSON.stringify(data)});
   const flush=async()=>{for(let n=0;n<5;n++)await Promise.resolve();};
   const navigate=path=>{context.location.pathname=path;context.location.href='https://x.com'+path;intervals.forEach(fn=>fn());};
   const hover=url=>listeners.get('pointerover')({target:{closest:()=>({querySelectorAll:()=>[{href:url,querySelector:()=>true}]})}});
-  return {node,requests,timers,intervals,renderedIds,opened,values,reply,flush,navigate,hover,advance:ms=>{now+=ms;intervals.forEach(fn=>fn());}};
+  return {node,requests,lookups,timers,intervals,renderedIds,opened,values,reply,replyLookup,flush,navigate,hover,advance:ms=>{now+=ms;intervals.forEach(fn=>fn());}};
 }
 const app=harness();
 assert.equal(app.node('schedule').value,'quarterly','New script connections default to quarterly');
@@ -193,4 +194,54 @@ for(const status of ['queued','running','awaiting_confirmation']){
   assert.equal(subscription.requests.length,2,'History confirmation remains owned by the website');
   assert.equal(subscription.timers.size,0);
 }
-console.log('ScriptCat submit-only feedback, lock release, fast post switching, failures, no polling/resume, schedules and connection security checks passed');
+const summary=(user='example',subscription=null)=>({user,display_name:'Example',subscription,last_success_at:null,active_task:null});
+const blogger=harness();blogger.reply(0,{ok:true,method:'password'});await blogger.flush();
+assert.equal(blogger.lookups.length,0,'A closed panel must not query subscription data');
+blogger.node('toggle').onclick();
+assert.equal(blogger.lookups.length,1,'Opening the panel checks the selected blogger');
+assert.match(blogger.node('subscription-state').textContent,/查询/);
+blogger.replyLookup(0,{...summary(),subscription:{enabled:true,schedule:'weekly',next_run:1_793_400_000},last_success_at:1_793_000_000});await blogger.flush();
+assert.match(blogger.node('subscription-state').textContent,/已订阅/);
+assert.doesNotMatch(blogger.node('last-update').textContent,/暂无|未获取/);
+assert.doesNotMatch(blogger.node('next-update').textContent,/暂无|未获取/);
+blogger.advance(120_000);
+assert.equal(blogger.lookups.length,1,'Subscription summaries must not become task polling');
+const updateBlogger=blogger.node('update').onclick();
+assert.equal(JSON.parse(blogger.requests[1].data).mode,'update','Immediate update must not change the subscription');
+assert.equal(JSON.parse(blogger.requests[1].data).url,'https://x.com/example/timeline');
+blogger.reply(1,{task:{...task,post_id:null,task_kind:'incremental'}});await updateBlogger;await blogger.flush();
+assert.equal(blogger.node('update').disabled,false,'Accepted background update releases the lock');
+assert.equal(blogger.lookups.length,2,'Submitting a blogger update refreshes its summary once');
+blogger.replyLookup(1,{...summary(),subscription:{enabled:true,schedule:'weekly',next_run:1_793_400_000},active_task:{status:'queued',task_kind:'incremental',next_run:0}});await blogger.flush();
+assert.match(blogger.node('subscription-note').textContent,/队列|排队/);
+blogger.advance(120_000);assert.equal(blogger.lookups.length,2);
+blogger.navigate('/other');assert.equal(blogger.lookups.length,3);
+assert.match(blogger.node('subscription-state').textContent,/查询/,'Previous author state must disappear on navigation');
+blogger.navigate('/third');assert.equal(blogger.lookups.length,4);
+blogger.replyLookup(2,summary('other',{enabled:true,schedule:'yearly',next_run:1_799_000_000}));await blogger.flush();
+assert.doesNotMatch(blogger.node('subscription-state').textContent,/已订阅/,'A stale author response must be ignored');
+blogger.replyLookup(3,summary('third',{enabled:false,schedule:'quarterly',next_run:null}));await blogger.flush();
+assert.match(blogger.node('subscription-state').textContent,/暂停/);
+assert.match(blogger.node('next-update').textContent,/暂停/);
+blogger.node('refresh-subscription').onclick();assert.equal(blogger.lookups.length,5);
+blogger.replyLookup(4,{error:'fixture unavailable'},503);await blogger.flush();
+assert.match(blogger.node('subscription-state').textContent,/失败|无法/);
+assert.doesNotMatch(blogger.node('subscription-state').textContent,/未订阅/,'Request failure cannot imply no subscription');
+blogger.node('refresh-subscription').onclick();blogger.replyLookup(5,summary('third'));await blogger.flush();
+assert.match(blogger.node('subscription-state').textContent,/未订阅/);
+assert.match(blogger.node('last-update').textContent,/暂无/);
+assert.match(blogger.node('subscription-note').textContent,/首次下载.*历史/);
+blogger.node('refresh-subscription').onclick();blogger.replyLookup(6,summary('third',{enabled:false,schedule:'once',next_run:null}));await blogger.flush();
+assert.match(blogger.node('subscription-state').textContent,/仅.*一次/);
+assert.match(blogger.node('next-update').textContent,/不自动/);
+const firstUpdate=harness();firstUpdate.reply(0,{ok:true,method:'password'});await firstUpdate.flush();
+const firstUpdateRequest=firstUpdate.node('update').onclick();
+firstUpdate.reply(1,{task:{...task,post_id:null,task_kind:'history'}});await firstUpdateRequest;
+assert.match(firstUpdate.node('status').textContent,/已提交历史下载/,'A first-time update must disclose historical scope');
+const switched=harness();switched.reply(0,{ok:true,method:'password'});await switched.flush();switched.node('toggle').onclick();
+switched.node('server').value='https://new.example';switched.node('credential').value='test-new-only';
+const changedServer=switched.node('settings-view').onsubmit({preventDefault(){}});switched.reply(1,{ok:true,method:'password'});await changedServer;
+switched.replyLookup(0,{error:'old connection'},401);await switched.flush();
+assert.equal(switched.node('connection').textContent,'已连接','Old summary authentication failures must not invalidate a new connection');
+assert.equal(switched.lookups.at(-1).url,'https://new.example/api/v1/scriptcat/bloggers/example');
+console.log('ScriptCat submission, subscription summaries, independent updates, stale-response guards, no task polling and connection security checks passed');
