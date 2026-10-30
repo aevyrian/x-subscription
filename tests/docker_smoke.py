@@ -14,6 +14,14 @@ def docker(*args):
 
 
 def main(image, platform):
+    # Classic Docker stores cannot keep two platforms under one index digest.
+    manifest = json.loads(docker('buildx', 'imagetools', 'inspect', '--raw', image))
+    system, architecture = platform.split('/')
+    candidates = [item['digest'] for item in manifest['manifests']
+                  if item.get('platform', {}).get('os') == system
+                  and item.get('platform', {}).get('architecture') == architecture]
+    assert len(candidates) == 1 and candidates[0].startswith('sha256:'), platform
+    image = image.rsplit('@', 1)[0] + '@' + candidates[0]
     name = 'xarchive-smoke-' + uuid.uuid4().hex
     volume = name + '-data'
     password = uuid.uuid4().hex
@@ -65,7 +73,7 @@ def main(image, platform):
         request('/api/v1/auth/login', {'password': password})
         assert request('/api/v1/auth')['logged_in']
         request('/api/v1/settings')
-        print('Container startup, authentication, non-root user and restart persistence passed:', image)
+        print('Container startup, authentication, non-root user and restart persistence passed:', platform, image)
     finally:
         subprocess.run(['docker', 'rm', '-f', name], check=False, stdout=subprocess.DEVNULL, timeout=60)
         subprocess.run(['docker', 'volume', 'rm', volume], check=False, stdout=subprocess.DEVNULL, timeout=60)
