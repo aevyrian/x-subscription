@@ -47,7 +47,7 @@ docker compose up -d
 
 默认镜像为 `ghcr.io/aevyrian/x-subscription:1.0.11`。仓库和镜像当前保持私有，需要有权访问的 GitHub 账号；使用具有 `read:packages` 权限的个人访问令牌，通过 `docker login ghcr.io -u 你的GitHub用户名` 的交互密码提示登录，不把令牌写入 Compose。镜像若由管理员改为公开后可匿名拉取。认证说明见 [GitHub 官方文档](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)。
 
-版本号固定便于回退；要使用另一版本，在私有 `.env` 中设置 `XARCHIVE_IMAGE=ghcr.io/aevyrian/x-subscription:目标版本`。Release 的 `IMAGE.txt` 给出不可变镜像摘要，`SHA256SUMS.txt` 可校验下载附件。Docker Hub 尚未配置发布账号，当前以 GHCR 为镜像入口。
+版本号固定便于回退；要使用另一版本，在私有 `.env` 中设置 `XARCHIVE_IMAGE=ghcr.io/aevyrian/x-subscription:目标版本`。Release 的 `IMAGE.txt` 给出不可变镜像摘要，`SHA256SUMS.txt` 可校验下载附件。同一镜像也已同步到 [Docker Hub](https://hub.docker.com/r/aevyrian/x-subscription)：`aevyrian/x-subscription:1.0.11` 和 `latest`，两架构与 GHCR 摘要一致，仓库同样保持私有。使用 Docker Hub 时先执行 `docker login`，再在 Compose 同目录的私有 `.env` 中设置 `XARCHIVE_IMAGE=aevyrian/x-subscription:1.0.11`，然后执行原来的 `docker compose pull` 和 `docker compose up -d`。
 
 需要从源码构建时，下载源码包，在源码目录执行 `docker compose -f compose.yaml -f compose.build.yaml up -d --build`；它使用本地 `xarchive:local` 镜像。
 
