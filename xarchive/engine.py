@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import subprocess
@@ -11,6 +12,8 @@ from pathlib import Path
 
 from .library import index_folder
 from .worker import BatchComplete, DownloadError, HistoryConfirmation, Interrupted
+
+log = logging.getLogger(__name__)
 
 
 def parse_cookies(value):
@@ -183,11 +186,6 @@ class Engine:
             progress(count[0])
             if interrupted():
                 raise Interrupted()
-            if outcome.get('type') == 'rate_limit':
-                delay = outcome.get('retry_after')
-                raise DownloadError('X 请求限流，冷却后自动继续；已保存进度保留',
-                                    retry_after=delay if type(delay) is int and delay > 0 else 900,
-                                    cooldown_scope='task' if outcome.get('scope') == 'task' else 'shared')
             if smart:
                 kind = outcome.get('type')
                 if kind == 'confirmation':
@@ -218,5 +216,19 @@ class Engine:
             if process and process.stdout:
                 process.stdout.close()
             Path(filename).unlink(missing_ok=True)
-            index_saved()
+            index_failed = False
+            try:
+                index_saved()
+            except Exception:
+                if outcome.get('type') != 'rate_limit':
+                    raise
+                index_failed = True
+                log.error('Task media indexing failed during rate limit; task=%s', task['id'])
+            if outcome.get('type') == 'rate_limit':
+                delay = outcome.get('retry_after')
+                message = ('X 请求限流，且内容索引失败；请检查存储目录权限和可用空间' if index_failed
+                           else 'X 请求限流，冷却后自动继续；已保存进度保留')
+                raise DownloadError(message,
+                                    retry_after=delay if type(delay) is int and delay > 0 else 900,
+                                    cooldown_scope='task' if outcome.get('scope') == 'task' else 'shared')
         return 0, 0

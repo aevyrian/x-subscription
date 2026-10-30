@@ -23,7 +23,7 @@ def share_origin():
 
 
 def public_request_allowed(request, origin):
-    if not origin or request.url.hostname != urlsplit(origin).hostname:
+    if not origin or (request.url.hostname or '').rstrip('.') != urlsplit(origin).hostname.rstrip('.'):
         return True
     # The public hostname never exposes login, settings or archive browsing.
     return request.method in ('GET', 'HEAD') and bool(re.fullmatch(

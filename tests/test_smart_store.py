@@ -1,6 +1,7 @@
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 from xarchive.store import Store
 from xarchive.worker import BatchComplete, HistoryConfirmation, Worker
@@ -98,6 +99,75 @@ class SmartStoreTests(unittest.TestCase):
         self.assertIsNone(reopened.claim())
         self.assertEqual(reopened.list_tasks('confirmation')['total'], 1)
         self.assertEqual(reopened.list_tasks('attention')['total'], 1)
+
+    def test_cancelled_confirmation_retry_restores_original_choice_and_cache(self):
+        task = self.awaiting()
+        self.store.execute("INSERT INTO crawl_posts(task_id,tweet_id,payload,has_media) VALUES (?, '123','{}',1)", (task['id'],))
+        self.store.cancel(task['id'])
+        self.store.retry(task['id'])
+        row = self.store.query('SELECT status,media_posts FROM tasks WHERE id=?', (task['id'],))[0]
+        self.assertEqual(row, {'status': 'awaiting_confirmation', 'media_posts': 1001})
+        self.assertEqual(len(self.store.query('SELECT * FROM crawl_posts WHERE task_id=?', (task['id'],))), 1)
+        self.assertEqual(self.store.confirm_history(task['id'], 'all')['status'], 'queued')
+
+    def test_cancelled_confirmation_bulk_retry_and_conflict(self):
+        first = self.awaiting('first')
+        blocked = self.awaiting('blocked')
+        self.store.cancel(first['id'])
+        self.store.cancel(blocked['id'])
+        self.store.submit('blocked')
+        result = self.store.bulk_tasks('retry')
+        self.assertEqual(result, {'affected': 1, 'skipped': 2, 'matched': 3})
+        self.assertEqual(self.store.query('SELECT status FROM tasks WHERE id=?', (first['id'],))[0]['status'], 'awaiting_confirmation')
+        with self.assertRaises(ValueError):
+            self.store.retry(blocked['id'])
+
+    def test_media_history_does_not_advance_incremental_baseline(self):
+        now = 1700000000
+        baseline = str((now * 1000 - 1288834974657) << 22)
+        with patch('xarchive.store.time.time', return_value=now):
+            history, _ = self.store.subscribe('example')
+            claimed = self.store.claim()
+            newest = str(int(baseline) + 200)
+            self.store.execute("UPDATE tasks SET crawl_mode='media' WHERE id=?", (history['id'],))
+            self.store.execute("INSERT INTO crawl_posts(task_id,tweet_id,payload,has_media,completed) VALUES (?, ?, '{}', 1, 1)", (history['id'], newest))
+            self.store.finish(claimed)
+            incremental, _ = self.store.submit('example', source='update')
+        self.assertEqual(incremental['since_id'], baseline)
+        self.assertLess(int(incremental['since_id']), int(baseline) + 100)
+
+    def test_old_running_history_cannot_advance_inflight_incremental_watermark(self):
+        now = 1700000000
+        baseline = str((now * 1000 - 1288834974657) << 22)
+        with patch('xarchive.store.time.time', return_value=now):
+            history, _ = self.store.subscribe('example')
+            claimed = self.store.claim()
+            incremental, _ = self.store.submit('example', source='update')
+            self.store.execute("INSERT INTO crawl_posts(task_id,tweet_id,payload,has_media,completed) VALUES (?, ?, '{}', 1, 1)", (history['id'], str(int(baseline) + 200)))
+            self.store.finish(claimed)
+            self.store.cancel(incremental['id'])
+            replacement, _ = self.store.submit('example', source='update')
+        self.assertEqual(replacement['since_id'], baseline)
+
+    def test_old_history_without_watermark_uses_creation_time_for_incremental(self):
+        now = 1700000000
+        baseline = str((now * 1000 - 1288834974657) << 22)
+        with patch('xarchive.store.time.time', return_value=now):
+            history, _ = self.store.subscribe('example')
+            self.store.execute('UPDATE bloggers SET high_water_id=NULL')
+            self.store.execute("INSERT INTO posts(id,user,url,added) VALUES (?, 'example', 'fixture', 0)", (str(int(baseline) + 200),))
+            incremental, _ = self.store.submit('example', source='update')
+        self.assertEqual(incremental['since_id'], baseline)
+
+    def test_successful_incremental_advances_its_own_watermark(self):
+        history, _ = self.store.subscribe('example')
+        self.store.claim()
+        incremental, _ = self.store.submit('example', source='update')
+        claimed = self.store.claim()
+        newer = str(int(incremental['since_id']) + 200)
+        self.store.execute("INSERT INTO crawl_posts(task_id,tweet_id,payload,has_media,completed) VALUES (?, ?, '{}', 0, 1)", (incremental['id'], newer))
+        self.store.finish(claimed)
+        self.assertEqual(self.store.query('SELECT high_water_id FROM bloggers')[0]['high_water_id'], newer)
 
     def test_all_and_recent300_choices_are_persisted_without_resetting_progress(self):
         for choice in ('all', 'recent300'):

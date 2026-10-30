@@ -4,7 +4,7 @@
 
 拾存是一个自托管的 X / Twitter 归档工具：从 X 页面或网站添加帖子与博主，由 gallery-dl 保存文字、图片和视频，再在私人网站里浏览、播放、收藏和整理。后端、网站和 ScriptCat 脚本共用同一套数据；一个 Docker 镜像即可运行。
 
-[正式版 v1.0.9](https://github.com/aevyrian/x-subscription/releases/tag/v1.0.9) · [更新说明](CHANGELOG.md) · [NAS 部署模板](compose.nas.yaml)
+[正式版 v1.0.10](https://github.com/aevyrian/x-subscription/releases/tag/v1.0.10) · [更新说明](CHANGELOG.md) · [NAS 部署模板](compose.nas.yaml)
 
 ## 能做什么
 
@@ -35,13 +35,21 @@ gallery-dl 负责解析与下载；拾存负责队列、计划、归档索引和
 
 ## Docker 启动
 
-需要已有 Docker Engine 与 Compose。下载正式版源码，或克隆指定版本：
+需要已有 Docker Engine 与 Compose。正式版提供 `linux/amd64` 和 `linux/arm64` 镜像，无需本机安装 Python 或编译源码。
+
+1. 在 [正式版附件](https://github.com/aevyrian/x-subscription/releases/tag/v1.0.10) 下载 `xarchive-docker-v1.0.10.zip` 并解压。
+2. 在解压目录执行：
 
 ```sh
-git clone --branch v1.0.9 --depth 1 https://github.com/aevyrian/x-subscription.git
-cd x-subscription
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
+
+默认镜像为 `ghcr.io/aevyrian/x-subscription:1.0.10`。仓库和镜像当前保持私有，需要有权访问的 GitHub 账号；使用具有 `read:packages` 权限的个人访问令牌，通过 `docker login ghcr.io -u 你的GitHub用户名` 的交互密码提示登录，不把令牌写入 Compose。镜像若由管理员改为公开后可匿名拉取。认证说明见 [GitHub 官方文档](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)。
+
+版本号固定便于回退；要使用另一版本，在私有 `.env` 中设置 `XARCHIVE_IMAGE=ghcr.io/aevyrian/x-subscription:目标版本`。Release 的 `IMAGE.txt` 给出不可变镜像摘要，`SHA256SUMS.txt` 可校验下载附件。Docker Hub 尚未配置发布账号，当前以 GHCR 为镜像入口。
+
+需要从源码构建时，下载源码包，在源码目录执行 `docker compose -f compose.yaml -f compose.build.yaml up -d --build`；它使用本地 `xarchive:local` 镜像。
 
 打开 **http://127.0.0.1:8787**，首次进入设置网站密码。默认只允许本机访问；局域网 / NAS 使用见下节。
 
@@ -61,7 +69,7 @@ docker compose up -d --build
 
 1. 准备 `data/config` 和 `data/downloads` 两个目录，让容器用户有读写权限。模板默认 UID / GID 为 `10001:10001`；可通过 `PUID`、`PGID` 改为 NAS 上实际拥有这些目录的用户。
 2. 模板默认只绑定本机环回地址；需要在内网直接访问时，将 `XARCHIVE_BIND` 设为 NAS 的局域网 IP。`XARCHIVE_PORT` 默认 `8787`，使用前确认没有被占用。可在同目录私有 `.env` 文件中设置这些值。
-3. 执行 `docker compose -f compose.nas.yaml up -d --build`。内网通过 `http://NAS内网IP:8787` 访问，外网继续通过配置好的可信 HTTPS 域名访问；两个入口都需要原网站密码。
+3. 执行 `docker compose -f compose.nas.yaml pull`，再执行 `docker compose -f compose.nas.yaml up -d`。内网通过 `http://NAS内网IP:8787` 访问，外网继续通过配置好的可信 HTTPS 域名访问；两个入口都需要原网站密码。
 
 Linux 终端准备默认目录权限的示例：
 
@@ -73,59 +81,6 @@ sudo chown -R 10001:10001 data/config data/downloads
 只对本项目的新目录设置权限；已有媒体仓库按其实际权限配置挂载，避免递归修改旧目录。内网可直接使用 NAS 私有 IP 的 HTTP 入口，外网使用带可信证书的 HTTPS 域名。**内网 HTTP 传输不加密，网站密码、会话及填写的 Cookie 等敏感内容可能被同网段监听；只在自己信任的内网使用。** 模板不自动配置证书或 HTTPS。单帖分享使用独立域名，配置见下文。
 
 HTTPS 反向代理或隧道应保留原始 Host，并传递 `X-Forwarded-Proto: https`。Uvicorn 默认启用代理头处理，但只信任本机环回地址；容器内代理需将 `FORWARDED_ALLOW_IPS` 配置为受控代理地址或专用 Docker 网段，并保持该网段在重建后稳定。后端端口按需要绑定 NAS 内网地址、本机环回或专用容器网络，不无条件信任任意来源的代理头。上线后需要实际验证 HTTPS 登录、Secure 会话和同源提交，不能仅凭域名或健康接口判断完成。
-
-### 当前 NAS 的杭州 FRP / HTTPS 入口（2026-10-24）
-
-| 用途 | 入口 | 本轮处理 |
-| --- | --- | --- |
-| 杭州管理入口 | **https://x.2c2d.cn** | 新增，使用原网站密码和原脚本连接密码 |
-| NAS 内网 | http://10.0.0.10:8787 | 保留原绑定和数据 |
-| 原 Cloudflare 外网入口 | https://x.522661.xyz | 保留，作为独立备用入口 |
-| 原单帖分享 | https://x-share.522661.xyz | 保留原路由及权限边界 |
-
-实际后端在飞牛 `L8 / 10.0.0.10`，容器 `xarchive` 监听 8787，通过宿主机 `10.0.0.10:8787` 和 `xarchive_default` 网络提供服务。容器地址本轮为 `172.25.0.3`，稳定调用名为 `archive:8787`；网络为 `172.25.0.0/16`。应用 Compose 仍为 `/vol1/1000/Docker/XArchive/compose.yaml`，本轮未修改或重建应用和 Tunnel。
-
-```text
-HTTPS x.2c2d.cn:443
-  → 杭州公网入口 118.178.124.213:443 → frps:8443
-  → NAS 独立 frpc → 127.0.0.1:9443 → Caddy:443（TLS 终止）
-  → 同一私有网络 archive:8787（HTTP）
-
-HTTP x.2c2d.cn:80
-  → 杭州公网入口 :80 → frps:8080
-  → NAS 独立 frpc → 127.0.0.1:9080 → Caddy:80
-  → ACME 验证，普通请求跳转 HTTPS
-```
-
-NAS 复用 `/var/apps/frpc/target/app/frpc`（0.71.0），独立连接杭州已有 frps 0.71.1 的 **7000** 控制端口。新增代理名为 `xarchive-nas-http-hz`、`xarchive-nas-https-hz`，均使用 `customDomains = ["x.2c2d.cn"]`，不设置 `subdomain`。杭州 `subDomainHost = "spee.2c2d.cn"` 保持原值，访问域名不是 `x.spee.2c2d.cn`。HTTPS 代理使用 PROXY v2，Caddy 只接受 Docker 网关 `172.25.0.1/32` 的 PROXY 信息，再传递原始 Host、HTTPS 协议及客户端地址给应用；应用原可信代理范围保持不变。
-
-| 配置或数据 | NAS 实际路径 / 说明 |
-| --- | --- |
-| 新入口目录 | `/vol1/1000/Docker/XArchive/hangzhou/` |
-| 独立客户端 | `hangzhou/frpc.toml`；包含复用认证，权限 0600，不复制到文档或仓库 |
-| 客户端服务 | `/etc/systemd/system/xarchive-frpc-hangzhou.service`；已启用开机启动 |
-| 客户端管理接口 | 仅 `127.0.0.1:7401`；原生 frpc 的 7400 与空配置不变 |
-| HTTPS 站点 | `hangzhou/Caddyfile` |
-| 入口 Compose | `hangzhou/compose.yaml`；容器 `xarchive-hangzhou-caddy`，Caddy 2.11.7，固定镜像摘要 |
-| 证书及续期资料 | `hangzhou/caddy-data/`；Caddy 状态另存 `hangzhou/caddy-config/`，均持久化；包含私钥，不公开或提交 |
-| 改前备份 | `/vol1/1000/Docker/XArchive/backups/20261024-hangzhou-entry/`，保留原应用 Compose 与原生 frpc 配置 |
-
-**DNS 与供应商绑定：** 最终经阿里云两个权威 DNS、Google 和 Cloudflare 公共解析核实，`x.2c2d.cn` 只返回杭州 `118.178.124.213`。本轮未迁移 DNS，也未修改解析记录；开工时部分查询曾同时返回北京 `123.56.116.9`，证书验证也曾命中该旧地址，后续权威解析收敛后申请成功。北京 Caddy 没有此域名站点，另有名为 `x` 的旧 TCP 代理监听 35441，实际客户端目标未证实，不能认定它属于拾存，故保留未动。若未来重新加入北京 A 记录，会分流此域名；任何历史 `x.2c2d.cn:35441` 链接也受该域名解析影响。供应商要求绑定时，完整填写 **`x.2c2d.cn`**，主机记录填写 **`x`**；本轮已实测 80/443 到新入口，无额外后台绑定步骤。
-
-**证书与续期：** Let's Encrypt YE2，SAN 为 `x.2c2d.cn`；本轮证书有效至 **2027-01-22 18:59:08（UTC+8）**，实时 TLS 1.3 与受信任证书校验通过。Caddy 自动申请和续期，无额外定时任务；须保持该域名指向杭州、80/443 转发及新入口服务在线，并保留 `caddy-data`。原 Cloudflare 边缘证书没有复制出来；这是一套独立证书。未来可在同一 Caddy 容器增加站点，并在 frpc 增加各域名的完整匹配，本轮仅配置 X。配置行为依据 [Caddy 自动 HTTPS](https://caddyserver.com/docs/automatic-https) 与 [frp 域名代理](https://gofrp.org/en/docs/examples/vhost-http/)。
-
-**实际验收：** 三入口健康与 worker、首页、前端 JS、ScriptCat 1.4.4 均通过，静态文件摘要相同；匿名管理与提交接口返回 401，同源空登录返回 422、跨源登录返回 403。用户用原密码在杭州入口登录并完成脚本连接；浏览器读取设置、帖子和任务均为 200，登录 Cookie 为 Secure / HttpOnly / SameSite=Strict，页面图片解码正常。用户实际脚本任务约 7 秒成功，后台来源为 `scriptcat:password`，新增 1 帖、3 份媒体；任务详情和归档可读，图片及视频 Range 请求均返回 206。原 LAN 的已有登录 API 仍为 200；原外网本轮核实登录页、鉴权边界、资源和健康，未重复输入个人密码。原应用与 Tunnel 容器 ID、应用 Compose、原生 frpc 配置不变。
-
-证据在本机 `.work/hangzhou-entry-20261024/` 的 `tls-verified.json`、`public-functional-verification.json`、`authenticated-browser.json`、`script-and-media-verified.json`、`original-browser-regression.json`、`verified-runtime.json`。北京管理机独立外网探测新入口得到杭州 IP、200、证书校验 0；该机探测原 Cloudflare 入口时 TLS 超时，本机 curl 与浏览器则正常，此网络差异未扩展排查，也未修改原隧道规则。本轮未做 NAS / 杭州重启演练，也未等到实际续期日；开机启动和自动续期配置已回读，不能将其当作未来已发生的验证。
-
-**撤销本次入口（保留数据）：** 在 NAS 执行以下两条，只停新增入口，不影响原应用、原 Tunnel、原生 frpc、数据库和媒体：
-
-```sh
-sudo systemctl disable --now xarchive-frpc-hangzhou.service
-sudo docker compose -f /vol1/1000/Docker/XArchive/hangzhou/compose.yaml stop
-```
-
-保留 `hangzhou/` 和改前备份，**不删目录、不删除卷、不使用 `down -v`**。恢复时先对同一 Compose 执行 `up -d`，再 `systemctl enable --now xarchive-frpc-hangzhou.service`。本轮没有改动杭州 frps、北京代理和 DNS 配置，撤销无需恢复它们；新域名会停止服务，两个原管理入口继续使用。
 
 ## 第一次使用
 
@@ -199,7 +154,7 @@ python3 -m venv .venv
 ## 备份、升级和旧库接入
 
 - **备份**：停止服务后备份整个 `config` 与 `downloads`，使用命名卷时备份整个卷。程序可重新构建，数据库、Cookie、订阅、收藏和媒体需要自己保存。
-- **升级**：先备份数据与 Compose，切换目标版本并重建镜像，继续挂载原数据。已有安装的路径、权限和其他服务配置不要直接被示例覆盖。
+- **升级**：先备份数据与 Compose，切换目标版本并拉取镜像，继续挂载原数据。已有安装的路径、权限和其他服务配置不要直接被示例覆盖。
 - **恢复**：停止服务，恢复对应备份再启动。仅回退程序时尽量保留当前数据；跨版本数据库兼容性需要核对，不能用旧库覆盖升级后新下载的记录。
 - **旧库接入**：提供 `python -m xarchive.migrate --help`。先备份新旧数据库与订阅，停止新版服务，再执行一次性导入；迁移工具索引旧媒体、复制去重记录和导入订阅，不搬走原文件。旧媒体需持续以只读方式挂载，并设置 `XARCHIVE_LEGACY_MEDIA`；模板已给出注释位置。它只面向旧 x-subscription 数据格式，不自动同步两套系统，也不会停掉旧容器。
 
@@ -217,6 +172,8 @@ xarchive/
 tests/                     # 自动检查
 ```
 
+当前发布流程先运行全部 Python 检查及两组 JavaScript 场景，再分别启动 amd64 / arm64 容器，检查非 root 运行、首次设置密码、认证和重启后配置保留；全部通过后才发布镜像和附件。ARM64 在 QEMU 模拟环境验证，不代表每款 NAS 实机验证。
+
 v1.0.7 已通过 **121 项 Python 自动检查**及两组 JavaScript 场景，覆盖 300 条首次抓取分界、1000/1001 条历史确认、帖子去重计数、限流等待范围与恢复时间、分页断点、部分保存失败恢复、确认权限和既有任务/调度功能。未连接真实 X、未做长期运行或跨日验收；媒体接口结束只表示本轮可访问列表结束。
 
 安装 `requirements-dev.txt` 后运行：
@@ -230,6 +187,8 @@ node tests/test_scriptcat_feedback.mjs
 ```
 
 v1.0.5 已通过 **63 项 Python 自动检查**和两组 JavaScript 场景，新增全筛选批量操作、取消/重试竞态、日历周期、季度迁移幂等、暂停保留、日期均衡及自动更新窗口与间隔检查。隔离网页实测跨页处理64项任务无确认，保留归档；NAS副本演练407订阅分散到91天、每天4–5条且两项暂停保留。v1.0.3的41项基础检查和v1.0.4私有IPv4/HTTPS边界检查继续保留，覆盖队列恢复、限流回队、写库重试、原子保存、权限、代理与连接密码、正文上限、导入及分享。此前已在真实 X / ScriptCat / NAS 链路验证新图帖、新视频帖落盘及网页播放，重复更新没有新增媒体文件。历史实测不保证所有账号、帖子与平台状态，本版未重测长期追更或长视频。
+
+**本次审计边界**：历史与增量水位修复防止后续同类漏收；旧版本已写高的水位和此前漏帖不会自动回退或补抓。旧媒体挂载点仍存在但底层卷脱挂时，无法可靠区分缺失文件，修复下载前应确认旧卷在线。保管好 config 目录权限；脚本连接密码不要复用网站管理密码，宿主页脚本不是可信的凭据输入隔离环境。
 
 **已知边界**：X 限流、登录状态、账号权限和搜索返回范围会影响完整性；不保证下载不可见或已删除内容。当前不采集评论、转帖、引用帖和文章；大仓库仍按博主扫描索引。手机仅做模拟尺寸检查；长期自动计划、长视频及 Chrome 中用户自设新密码的完整真实下载链路未全面验证。HTTPS 入口需要单独配置并验证，本次升级不会自动加密原有 HTTP 管理连接。
 

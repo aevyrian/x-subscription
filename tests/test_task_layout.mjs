@@ -17,8 +17,9 @@ function harness(saved, denied=false) {
   const node = id => {if(!nodes.has(id))nodes.set(id,element());return nodes.get(id);};
   const layouts = ['a','b'].map(layout=>element({layout}));
   const filters = ['all','active','confirmation','attention','done'].map(filter=>element({filter}));
+  const bulkButtons = ['delete','retry','cancel'].map(operation=>element({operation}));
   const sandbox = {console,URLSearchParams,Map,Set,Date,Number,String,Object,Math,AbortController,
-    document:{hidden:false,getElementById:node,addEventListener(type,listener){listeners.set(type,listener);},querySelector(){return null;},querySelectorAll(selector){return selector==='[data-action="task-layout"]'?layouts:selector==='[data-action="task-filter"]'?filters:[];}},
+    document:{hidden:false,getElementById:node,addEventListener(type,listener){listeners.set(type,listener);},querySelector(){return null;},querySelectorAll(selector){return selector==='[data-action="task-layout"]'?layouts:selector==='[data-action="task-filter"]'?filters:selector==='[data-action="task-bulk"]'?bulkButtons:[];}},
     localStorage:{getItem(key){if(denied)throw Error('unavailable');return values.get(key);},setItem(key,value){if(denied)throw Error('unavailable');values.set(key,value);}},
     location:{search:'?view=tasks'},history:{pushState(state,title,url){sandbox.location.search=url.includes('?')?url.slice(url.indexOf('?')):'';}},window:{scrollY:0,innerHeight:1000,addEventListener(){},scrollTo(){}},
     ResizeObserver:class{observe(){}},requestAnimationFrame(){},matchMedia:()=>({matches:false}),
@@ -39,7 +40,7 @@ function harness(saved, denied=false) {
         return {items,total:items.length,counts:Object.fromEntries(Object.entries(groups).map(([key,rows])=>[key,rows.length]))};
       }
       return {};};`,context);
-  return {run:code=>vm.runInContext(code,context),node,values,calls,intervals,context,listeners,timers,
+  return {run:code=>vm.runInContext(code,context),node,values,calls,intervals,context,listeners,timers,bulkButtons,
     runTimer(delay){const entry=[...timers].find(([id,timer])=>timer.delay===delay);if(entry){timers.delete(entry[0]);return entry[1].fn();}}};
 }
 
@@ -151,6 +152,111 @@ assert.match(app.run('scheduleOptions()'),/value="quarterly" selected/);
 assert.doesNotMatch(app.run('scheduleOptions()'),/value="daily"/);
 assert.match(app.run(`scheduleOptions('daily')`),/每天（旧计划）/);
 for(const value of ['three_days','weekly','monthly','quarterly','yearly','once'])assert.match(app.run('scheduleOptions()'),new RegExp('value="'+value+'"'));
+
+const pausedPlan=harness();
+pausedPlan.run(`rows=new Map([['example',{user:'example',schedule:'monthly',enabled:false}]]);route=async()=>{};`);
+await pausedPlan.run(`action({dataset:{action:'toggle-plan',user:'example'}})`);
+assert.ok(pausedPlan.calls.some(call=>call.path==='/subscriptions/example'),'Resuming a plan must update it');
+assert.deepEqual(JSON.parse(JSON.stringify(pausedPlan.calls.find(call=>call.path==='/subscriptions/example').body)),{schedule:'monthly',enabled:true},'Resuming a plan must preserve its frequency');
+pausedPlan.calls.length=0;
+pausedPlan.run(`rows.get('example').enabled=false`);
+await pausedPlan.listeners.get('change')({target:{id:'',dataset:{plan:'example'},value:'weekly',disabled:false,matches:()=>true}});
+assert.equal(pausedPlan.calls.find(call=>call.path==='/subscriptions/example').body.enabled,false,'Changing a paused plan frequency must keep it paused');
+pausedPlan.calls.length=0;
+pausedPlan.run(`rows.get('example').enabled=true;rows.get('example').schedule='monthly'`);
+await pausedPlan.run(`action({dataset:{action:'toggle-plan',user:'example'}})`);
+assert.equal(pausedPlan.calls.find(call=>call.path==='/subscriptions/example').body.enabled,false,'Pausing must disable the recurring plan');
+assert.equal(pausedPlan.calls.find(call=>call.path==='/subscriptions/example').body.schedule,'monthly');
+pausedPlan.calls.length=0;
+pausedPlan.run(`rows.get('example').schedule='once';rows.get('example').enabled=false`);
+await pausedPlan.listeners.get('change')({target:{id:'',dataset:{plan:'example'},value:'weekly',disabled:false,matches:()=>true}});
+assert.equal(pausedPlan.calls.find(call=>call.path==='/subscriptions/example').body.enabled,true,'Choosing a recurring frequency for a once plan enables it');
+pausedPlan.context.closeMedia=()=>{};
+pausedPlan.run(`rows.get('example').schedule='monthly';rows.get('example').enabled=false`);
+await pausedPlan.run(`action({dataset:{action:'plan-user',user:'example'}})`);
+pausedPlan.node('edit-schedule').value='weekly';pausedPlan.calls.length=0;
+await pausedPlan.run('editSave()');
+assert.equal(pausedPlan.calls.find(call=>call.path==='/subscriptions/example').body.enabled,false,'Editing frequency through blogger search must keep a paused plan paused');
+pausedPlan.run(`api=async()=>({items:[{user:'example',display_name:'Example',schedule:'monthly',enabled:0,next_run:0}]})`);
+assert.match(await pausedPlan.run('renderSubscriptions()'),/data-action="toggle-plan"[^>]*>恢复/,'Paused recurring plans expose resume');
+
+const planRace=harness();
+planRace.run(`rows=new Map([['example',{user:'example',schedule:'monthly',enabled:true}]]);route=async()=>{};
+  api=(path,method,body)=>{calls.push({path,method,body});return new Promise(resolve=>finishPlan=resolve);};`);
+const planToggle={dataset:{action:'toggle-plan',user:'example'},disabled:false};
+const planSelect={id:'',dataset:{plan:'example'},value:'monthly',disabled:false,matches:()=>true};
+const planRow={querySelectorAll:()=>[planToggle,planSelect]};
+planToggle.closest=planSelect.closest=()=>planRow;planRace.context.planToggle=planToggle;
+const pendingPlan=planRace.run('action(planToggle)');
+assert.equal(planToggle.disabled,true,'Pause must lock both plan controls');
+assert.equal(planSelect.disabled,true,'Pause must lock the frequency control');
+planSelect.value='weekly';await planRace.listeners.get('change')({target:planSelect});
+assert.equal(planRace.calls.length,1,'A frequency change cannot race a pending pause');
+planRace.context.closeMedia=()=>{};
+await assert.rejects(planRace.run(`action({dataset:{action:'plan-user',user:'example'}})`),/正在保存/,'Blogger plan edits must also wait for the same plan');
+assert.equal(planRace.calls.length,1);
+planRace.run('finishPlan({})');await pendingPlan;
+assert.equal(planToggle.disabled,false);assert.equal(planSelect.disabled,false);
+planRace.calls.length=0;planSelect.value='weekly';
+const pendingFrequency=planRace.listeners.get('change')({target:planSelect});
+assert.equal(planToggle.disabled,true);assert.equal(planSelect.disabled,true);
+await planRace.run('action(planToggle)');
+assert.equal(planRace.calls.length,1,'Pause cannot race a pending frequency change');
+planRace.run('finishPlan({})');await pendingFrequency;
+assert.equal(planToggle.disabled,false);assert.equal(planSelect.disabled,false);
+
+const failedPlan=harness();
+failedPlan.run(`rows=new Map([['example',{user:'example',schedule:'monthly',enabled:true}]]);route=async()=>{};api=async()=>{throw Error('offline')};`);
+const failedToggle={dataset:{action:'toggle-plan',user:'example'},disabled:false};
+const failedSelect={id:'',dataset:{plan:'example'},value:'weekly',disabled:false,matches:()=>true};
+const failedRow={querySelectorAll:()=>[failedToggle,failedSelect]};failedToggle.closest=failedSelect.closest=()=>failedRow;
+await failedPlan.listeners.get('change')({target:failedSelect});
+assert.equal(failedSelect.value,'monthly','A failed frequency update restores the saved value');
+assert.equal(failedSelect.disabled,false);assert.equal(failedToggle.disabled,false);
+failedPlan.context.failedToggle=failedToggle;
+await assert.rejects(failedPlan.run('action(failedToggle)'),/offline/);
+assert.equal(failedSelect.disabled,false);assert.equal(failedToggle.disabled,false);
+failedSelect.value='weekly';
+failedPlan.run(`api=async()=>({});route=async()=>{throw Error('refresh failed')}`);
+await failedPlan.listeners.get('change')({target:failedSelect});
+assert.equal(failedSelect.value,'weekly','A saved frequency is not rolled back when only refresh fails');
+assert.equal(failedSelect.disabled,false);assert.equal(failedToggle.disabled,false);
+await assert.rejects(failedPlan.run('action(failedToggle)'),/refresh failed/);
+assert.equal(failedPlan.run(`planMutationBusy.has('example')`),false,'A failed refresh releases the plan lock');
+assert.equal(failedSelect.disabled,false);assert.equal(failedToggle.disabled,false);
+const redrawnPlan=harness();
+redrawnPlan.run(`planMutationBusy.add('example');api=async()=>({items:[{user:'example',display_name:'Example',schedule:'monthly',enabled:1,next_run:0}]})`);
+const redrawn=await redrawnPlan.run('renderSubscriptions()');
+assert.match(redrawn,/data-plan="example"[^>]*disabled/,'A redrawn plan keeps its frequency locked');
+assert.match(redrawn,/data-action="toggle-plan"[^>]*disabled/,'A redrawn plan keeps pause locked');
+
+const pendingSearch=harness();
+await pendingSearch.run(`taskQuery='cheng';route()`);
+assert.equal(pendingSearch.bulkButtons[0].disabled,false);
+pendingSearch.calls.length=0;
+pendingSearch.listeners.get('input')({target:{id:'task-search',value:''}});
+assert.equal(pendingSearch.bulkButtons[0].disabled,true,'Search changes must disable visible batch controls immediately');
+await pendingSearch.run(`action({dataset:{action:'task-bulk',operation:'delete'}})`);
+assert.equal(pendingSearch.calls.some(call=>call.path==='/tasks/bulk'),false,'Changing search must block bulk operations until the new results load');
+await pendingSearch.runTimer(200);
+assert.equal(pendingSearch.bulkButtons[0].disabled,false);
+await pendingSearch.run(`action({dataset:{action:'task-bulk',operation:'delete'}})`);
+assert.equal(pendingSearch.calls.find(call=>call.path==='/tasks/bulk').body.q,'','Bulk actions resume with the displayed search after it loads');
+const lateSearch=harness();
+lateSearch.run(`api=(path,method,body,signal)=>new Promise(resolve=>pendingResult={resolve,signal});oldRoute=route();`);
+lateSearch.listeners.get('input')({target:{id:'task-search',value:'new'}});
+assert.equal(lateSearch.run('pendingResult.signal.aborted'),true,'Typing cancels an older task request');
+lateSearch.run(`pendingResult.resolve({items:fixture,total:3,counts:{all:3,active:1,confirmation:0,attention:1,done:1}})`);
+await lateSearch.run('oldRoute');
+assert.equal(lateSearch.bulkButtons[0].disabled,true,'An old response cannot re-enable bulk controls for a new search');
+const failedBatchSearch=harness();await failedBatchSearch.run('route()');
+failedBatchSearch.run(`api=(path)=>path==='/tasks/bulk'?new Promise((resolve,reject)=>failBatch=reject):Promise.resolve({});`);
+const batchButton=failedBatchSearch.bulkButtons[0];batchButton.dataset.action='task-bulk';
+batchButton.closest=selector=>selector==='[data-action]'?batchButton:null;
+const failingClick=failedBatchSearch.listeners.get('click')({target:batchButton});
+failedBatchSearch.listeners.get('input')({target:{id:'task-search',value:'new'}});
+failedBatchSearch.run(`failBatch(Error('offline'))`);await failingClick;
+assert.equal(batchButton.disabled,true,'A failed batch must not re-enable controls while new search results are pending');
 
 const search=harness();
 search.listeners.get('input')({target:{id:'task-search',value:'spacex'}});

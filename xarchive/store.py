@@ -255,6 +255,12 @@ class Store:
     def add_blogger(self, user, db):
         db.execute("INSERT OR IGNORE INTO bloggers(user,created,history_status) VALUES (?,?,'new')", (user, time.time()))
 
+    @staticmethod
+    def _history_baseline(db, user, created):
+        baseline = max(0, int(created * 1000 - 1288834974657)) << 22
+        latest = db.execute('SELECT id FROM posts WHERE user=? ORDER BY LENGTH(id) DESC,id DESC LIMIT 1', (user,)).fetchone()
+        return str(min(baseline, int(latest['id'])) if latest else baseline)
+
     def submit(self, value, limit=0, source='website', db=None):
         parsed = target(value)
         if type(limit) is not int or not 0 <= limit <= 10000:
@@ -265,7 +271,8 @@ class Store:
                 return self.submit(value, limit, source, connection)
         self.add_blogger(parsed['user'], db)
         blogger = db.execute('SELECT * FROM bloggers WHERE user=?', (parsed['user'],)).fetchone()
-        has_history = db.execute("SELECT 1 FROM tasks WHERE user=? AND task_kind='history' LIMIT 1", (parsed['user'],)).fetchone()
+        history = db.execute("SELECT MIN(created) created FROM tasks WHERE user=? AND task_kind='history'", (parsed['user'],)).fetchone()['created']
+        has_history = history is not None
         kind = 'single' if parsed['post_id'] else 'incremental' if blogger['history_status'] != 'new' or source in ('scheduled', 'update') and has_history else 'history'
         existing = db.execute("""SELECT * FROM tasks WHERE user=? AND post_id IS ?
                               AND (task_kind=? OR task_kind='legacy')
@@ -278,9 +285,13 @@ class Store:
             return dict(existing), True
         identifier, now = uuid.uuid4().hex, time.time()
         since_id = None
+        if kind == 'history' and not blogger['high_water_id']:
+            db.execute('UPDATE bloggers SET high_water_id=? WHERE user=?',
+                       (self._history_baseline(db, parsed['user'], history if has_history else now), parsed['user']))
         if kind == 'incremental':
             latest = db.execute('SELECT id FROM posts WHERE user=? ORDER BY LENGTH(id) DESC,id DESC LIMIT 1', (parsed['user'],)).fetchone()
-            since_id = blogger['high_water_id'] or (latest['id'] if latest else str(max(0, int((blogger['created'] * 1000 - 1288834974657))) << 22))
+            since_id = blogger['high_water_id'] or (self._history_baseline(db, parsed['user'], history) if has_history else
+                latest['id'] if latest else str(max(0, int((blogger['created'] * 1000 - 1288834974657))) << 22))
             # Partial downloads must not move the next task past unfinished tweets.
             db.execute('UPDATE bloggers SET high_water_id=COALESCE(high_water_id,?) WHERE user=?', (since_id, parsed['user']))
         db.execute('''INSERT INTO tasks(id,user,post_id,url,limit_count,source,next_run,created,task_kind,since_id)
@@ -406,13 +417,14 @@ class Store:
                 raise ValueError('该对象已有活动任务')
 
     def _retry_task(self, db, row):
-        if row['task_kind'] == 'history' and (row['history_choice'] == 'skip' or row['media_posts'] > 1000 and not row['history_choice']):
+        if row['task_kind'] == 'history' and row['history_choice'] == 'skip':
             return 0
         if db.execute("""SELECT 1 FROM tasks WHERE url=? AND (task_kind=? OR task_kind='legacy' OR ?='legacy') AND id!=?
                        AND status IN ('queued','running','retry','awaiting_confirmation')""", (row['url'], row['task_kind'], row['task_kind'], row['id'])).fetchone():
             return 0
-        return db.execute("""UPDATE tasks SET status='queued',source='website',attempts=0,next_run=?,finished=NULL,
-                            started=NULL,error=NULL WHERE id=?""", (max(time.time(), row['cooldown_until']), row['id'])).rowcount
+        status = 'awaiting_confirmation' if row['task_kind'] == 'history' and row['media_posts'] > 1000 and not row['history_choice'] else 'queued'
+        return db.execute("""UPDATE tasks SET status=?,source='website',attempts=0,next_run=?,finished=NULL,
+                            started=NULL,error=NULL WHERE id=?""", (status, max(time.time(), row['cooldown_until']), row['id'])).rowcount
 
     def delete_task(self, identifier):
         with self.connect() as db:
@@ -493,7 +505,9 @@ class Store:
                     if current['task_kind'] == 'history':
                         db.execute('UPDATE bloggers SET history_status=? WHERE user=?',
                                    ('recent300' if current['history_choice'] == 'recent300' else 'complete', task['user']))
-                    newest = db.execute('SELECT tweet_id FROM crawl_posts WHERE task_id=? AND completed=1 ORDER BY LENGTH(tweet_id) DESC,tweet_id DESC LIMIT 1', (task['id'],)).fetchone()
+                        db.execute('UPDATE bloggers SET high_water_id=COALESCE(high_water_id,?) WHERE user=?',
+                                   (self._history_baseline(db, task['user'], current['created']), task['user']))
+                    newest = db.execute('SELECT tweet_id FROM crawl_posts WHERE task_id=? AND completed=1 ORDER BY LENGTH(tweet_id) DESC,tweet_id DESC LIMIT 1', (task['id'],)).fetchone() if current['task_kind'] != 'history' else None
                     if newest:
                         old = db.execute('SELECT high_water_id FROM bloggers WHERE user=?', (task['user'],)).fetchone()['high_water_id']
                         if old is None or int(newest['tweet_id']) > int(old):

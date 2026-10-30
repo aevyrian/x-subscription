@@ -51,15 +51,31 @@ def tweet_media(tweet):
     data = tweet.get('legacy', tweet)
     if data.get('retweeted_status_id_str') or data.get('quoted_by_id_str'):
         return False
+    found = False
     for media in data.get('extended_entities', {}).get('media', ()):
         if media.get('ext_media_availability', {}).get('status') == 'Unavailable':
             continue
-        if media.get('type') == 'photo' and (media.get('media_url_https') or media.get('media_url')):
-            return True
-        if media.get('type') in ('video', 'animated_gif') and any(
-                variant.get('url') for variant in media.get('video_info', {}).get('variants', ())):
-            return True
-    return False
+        kind = media.get('type')
+        if kind == 'photo':
+            available = media.get('media_url_https') or media.get('media_url')
+        elif kind in ('video', 'animated_gif'):
+            available = any(variant.get('url') for variant in media.get('video_info', {}).get('variants', ()))
+        else:
+            continue
+        if not available:
+            raise SmartStop('error')
+        found = True
+    return found
+
+
+def media_identity(tweet):
+    media = tweet.get('legacy', tweet).get('extended_entities', {}).get('media', ())
+    items = [(item.get('type'), str(item.get('id_str') or item.get('id') or item.get('media_key') or ''))
+             for item in media if item.get('type') in ('photo', 'video', 'animated_gif')
+             and item.get('ext_media_availability', {}).get('status') != 'Unavailable']
+    if not items or any(not identifier for _, identifier in items) or len(set(items)) != len(items):
+        return None
+    return items
 
 
 class SmartStop(BaseException):
@@ -68,7 +84,46 @@ class SmartStop(BaseException):
         self.outcome = outcome
 
 
-class SmartDownloadJob(job.DownloadJob):
+class VerifiedDownloadJob(job.DownloadJob):
+    def handle_url(self, url, keywords):
+        from .library import safe_file
+        from .store import Store
+
+        target = Path(self.pathfmt.realdirectory) / self.pathfmt.build_filename(keywords)
+        if target.is_file():
+            return super().handle_url(url, keywords)
+        store = getattr(getattr(self, 'owner', None), 'store', None)
+        if store is None:
+            store = getattr(self, '_archive_store', None)
+            if store is None:
+                base = self.extractor.config('base-directory')
+                store = self._archive_store = Store(Path(base).parent)
+        tweet_id, num = str(keywords.get('tweet_id', '')), str(keywords.get('num', ''))
+        if tweet_id.isdigit() and num.isdigit():
+            for row in store.query("SELECT path FROM media WHERE post_id=? AND path LIKE '@legacy/%'", (tweet_id,)):
+                if not Path(row['path']).name.startswith(tweet_id + '_' + num + '.'):
+                    continue
+                if store.legacy is None or not store.legacy.is_dir():
+                    raise SmartStop('error')
+                try:
+                    safe_file(store, row['path'])
+                except ValueError:
+                    continue
+                self.pathfmt.set_filename(keywords)
+                self.pathfmt.fix_extension()
+                self.handle_skip()
+                return
+        if self.archive is None:
+            return super().handle_url(url, keywords)
+        check = self.archive.check
+        self.archive.check = lambda kw: bool(check(kw) and target.is_file())
+        try:
+            return super().handle_url(url, keywords)
+        finally:
+            self.archive.check = check
+
+
+class SmartDownloadJob(VerifiedDownloadJob):
     def __init__(self, extr, owner):
         super().__init__(extr)
         self.owner, self.current, self.failed = owner, None, False
@@ -102,6 +157,8 @@ class SmartDownloadJob(job.DownloadJob):
         finally:
             if self.status:
                 self.failed = self.owner.failed = True
+                if self.current is not None:
+                    self.owner.failed_media.add(self.current)
             self.status |= previous
 
     def finish_current(self):
@@ -123,6 +180,7 @@ class SmartRunner:
         self.emit = emit or (lambda event: print('XARCHIVE_EVENT ' + json.dumps(event), flush=True))
         self.batch_size, self.processed = batch_size, 0
         self.active_job, self.failed, self.boundary = None, False, False
+        self.failed_media = set()
 
     def guard(self, db):
         row = db.execute("SELECT 1 FROM tasks WHERE id=? AND generation=? AND status='running'",
@@ -190,8 +248,9 @@ class SmartRunner:
                             (self.task['id'],)):
             raise SmartStop('error')
 
-    def make_extractor(self, mode, cursor=None):
-        extr = extractor.find('https://x.com/' + self.task['user'] + ('/media' if mode == 'media' else '/tweets'))
+    def make_extractor(self, mode, cursor=None, post_id=None):
+        suffix = '/status/' + post_id if post_id else '/media' if mode == 'media' else '/tweets'
+        extr = extractor.find('https://x.com/' + self.task['user'] + suffix)
         original_config = extr.config
         def options(key, default=None):
             if key == 'cursor':
@@ -239,6 +298,8 @@ class SmartRunner:
                 # Stop a broken media listing instead of scanning it indefinitely.
                 if skipped >= self.batch_size:
                     raise SmartStop('error')
+            else:
+                skipped = 0
             if not has_media:
                 continue
             self.processed += inserted
@@ -273,7 +334,35 @@ class SmartRunner:
             extr.login = lambda: None
             extr.metadata = lambda: {}
             selected = rows[:self.batch_size]
-            self.download(extr, (json.loads(row['payload']) for row in selected))
+            try:
+                self.download(extr, (json.loads(row['payload']) for row in selected))
+            except SmartStop as stop:
+                if stop.outcome != 'error' or not self.failed_media:
+                    raise
+                original = {row['tweet_id']: json.loads(row['payload']) for row in selected}
+                for identifier in self.failed_media:
+                    with self.store.connect() as db:
+                        self.guard(db)
+                    fresh = self.make_extractor(self.task['crawl_mode'], post_id=identifier)
+                    fresh.login()
+                    tweet = next((item for item in fresh.tweets()
+                                  if str(item.get('rest_id') or item.get('legacy', item).get('id_str', '')) == identifier), None)
+                    expected = media_identity(original[identifier])
+                    if tweet is None or not tweet_media(tweet) or not expected or media_identity(tweet) != expected:
+                        raise SmartStop('error')
+                    with self.store.connect() as db:
+                        db.execute('BEGIN IMMEDIATE')
+                        self.guard(db)
+                        db.execute('UPDATE crawl_posts SET payload=? WHERE task_id=? AND tweet_id=? AND completed=0',
+                                   (json.dumps(tweet, separators=(',', ':'), ensure_ascii=False), self.task['id'], identifier))
+                selected_ids = {row['tweet_id'] for row in selected}
+                selected = [row for row in self.cached_posts() if row['tweet_id'] in selected_ids]
+                self.failed = False
+                self.failed_media.clear()
+                extr = self.make_extractor(self.task['crawl_mode'])
+                extr.login = lambda: None
+                extr.metadata = lambda: {}
+                self.download(extr, (json.loads(row['payload']) for row in selected))
             pending = {row['tweet_id'] for row in self.cached_posts()}
             if any(row['tweet_id'] in pending for row in selected):
                 raise SmartStop('error')
@@ -363,7 +452,7 @@ def smart_main(filename):
 def legacy_main():
     from gallery_dl.extractor.twitter import TwitterAPI
     from requests import Session
-    request, handle_limit = Session.request, TwitterAPI._handle_ratelimit
+    request, handle_limit, download_job = Session.request, TwitterAPI._handle_ratelimit, job.DownloadJob
     def limited(response, scope='shared'):
         print('XARCHIVE_EVENT ' + json.dumps({'type': 'rate_limit', 'scope': scope,
                                             'retry_after': retry_delay(response.headers)}), flush=True)
@@ -376,12 +465,14 @@ def legacy_main():
         return response
     Session.request = checked_request
     TwitterAPI._handle_ratelimit = lambda api, response: limited(response)
+    job.DownloadJob = VerifiedDownloadJob
     try:
         return main()
-    except SmartStop:
-        return 0
+    except SmartStop as stop:
+        return 1 if stop.outcome == 'error' else 0
     finally:
         Session.request, TwitterAPI._handle_ratelimit = request, handle_limit
+        job.DownloadJob = download_job
 
 
 if __name__ == '__main__':

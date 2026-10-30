@@ -66,6 +66,13 @@ class SharingTests(unittest.TestCase):
         self.client.cookies.clear()
         self.assertEqual(self.client.post('/api/v1/posts/1/share', headers={'Authorization': 'Bearer ' + token}).status_code, 403)
 
+    def test_public_host_with_trailing_dot_blocks_admin(self):
+        host = {'Host': 'share.example.test.'}
+        self.assertEqual(self.client.get('/api/v1/auth', headers=host).status_code, 404)
+        self.assertEqual(self.client.post('/api/v1/posts/1/share', headers=host).status_code, 404)
+        self.assertEqual(self.client.get('/static/share.js', headers=host).status_code, 200)
+        self.assertEqual(self.client.get('/api/v1/auth').status_code, 200)
+
     def test_missing_file_and_disabled_share(self):
         url = self.client.post('/api/v1/posts/1/share').json()['url']
         self.store.execute("UPDATE media SET path='../config/archive.sqlite3' WHERE id=1")

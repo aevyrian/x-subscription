@@ -1,0 +1,5 @@
+# Optional source-build override; the regular templates pull the released image.
+services:
+  archive:
+    build: .
+    image: xarchive:local

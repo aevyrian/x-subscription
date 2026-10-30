@@ -2,8 +2,7 @@
 name: xarchive
 services:
   archive:
-    build: .
-    image: xarchive:1.0.9
+    image: ${XARCHIVE_IMAGE:-ghcr.io/aevyrian/x-subscription:1.0.10}
     init: true
     user: "${PUID:-10001}:${PGID:-10001}"
     environment:
