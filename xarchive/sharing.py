@@ -73,7 +73,7 @@ def register_sharing(app, store, admin, origin):
     @app.get('/s/{token}/data')
     def public_data(token: str):
         post = shared_post(token)
-        post['media'] = store.query('SELECT id,kind FROM media WHERE post_id=? ORDER BY id', (post['id'],))
+        post['media'] = store.query('SELECT id,kind FROM media WHERE post_id=? AND size>0 ORDER BY id', (post['id'],))
         for media in post['media']:
             media['url'] = f'/s/{token}/media/{media["id"]}'
         return post

@@ -1,4 +1,4 @@
-name: Mirror verified v1.0.11 to Docker Hub
+name: Mirror latest verified release to Docker Hub
 
 on:
   workflow_dispatch:
@@ -16,7 +16,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
-      SOURCE: ghcr.io/aevyrian/x-subscription@sha256:bc2b413519ebc021cfeb5d479ea00434094c743ec268acaadb0de7ec9373f72b
       DESTINATION: docker.io/aevyrian/x-subscription
     steps:
       - name: Install registry copy tool
@@ -33,17 +32,29 @@ jobs:
           printf '%s' "$GH_TOKEN" | skopeo login --username "$GH_USERNAME" --password-stdin ghcr.io
           printf '%s' "$DOCKERHUB_TOKEN" | skopeo login --username aevyrian --password-stdin docker.io
       - name: Copy and verify immutable multi-platform image
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          release=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
+          [[ "$release" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          version=${release#v}
+          SOURCE=$(gh release download "$release" --repo "$GITHUB_REPOSITORY" --pattern IMAGE.txt --output -)
+          digest=${SOURCE#"ghcr.io/$GITHUB_REPOSITORY@sha256:"}
+          [[ "$digest" =~ ^[a-f0-9]{64}$ && "$SOURCE" == "ghcr.io/$GITHUB_REPOSITORY@sha256:$digest" ]]
           skopeo inspect --raw "docker://$SOURCE" > "$RUNNER_TEMP/source-index.json"
-          printf '%s  %s\n' "${SOURCE##*@sha256:}" "$RUNNER_TEMP/source-index.json" | sha256sum --check
+          printf '%s  %s\n' "$digest" "$RUNNER_TEMP/source-index.json" | sha256sum --check
           jq -e '.manifests | any(.platform.os == "linux" and .platform.architecture == "amd64") and any(.platform.os == "linux" and .platform.architecture == "arm64")' "$RUNNER_TEMP/source-index.json"
-          for tag in 1.0.11 latest; do
+          for tag in "$version" latest; do
+            skopeo inspect --raw "docker://ghcr.io/$GITHUB_REPOSITORY:$tag" > "$RUNNER_TEMP/ghcr-$tag.json"
+            cmp "$RUNNER_TEMP/source-index.json" "$RUNNER_TEMP/ghcr-$tag.json"
+          done
+          for tag in "$version" latest; do
             skopeo copy --all --preserve-digests "docker://$SOURCE" "docker://$DESTINATION:$tag"
             skopeo inspect --raw "docker://$DESTINATION:$tag" > "$RUNNER_TEMP/target-$tag.json"
             cmp "$RUNNER_TEMP/source-index.json" "$RUNNER_TEMP/target-$tag.json"
             sha256sum "$RUNNER_TEMP/target-$tag.json"
           done
-          echo 'Verified: Docker Hub 1.0.11 and latest match the tested GHCR index exactly.' >> "$GITHUB_STEP_SUMMARY"
+          echo "Verified: Docker Hub $version and latest match the tested GHCR index exactly." >> "$GITHUB_STEP_SUMMARY"
       - name: Clear runner registry credentials
         if: always()
         run: |

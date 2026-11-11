@@ -12,6 +12,8 @@ from urllib.parse import urlsplit
 from gallery_dl import main, postprocessor, config, extractor, job
 from gallery_dl.postprocessor.metadata import MetadataPP
 
+from .library import file_has_data, safe_file
+
 
 class AtomicMetadataPP(MetadataPP):
     @contextmanager
@@ -85,12 +87,18 @@ class SmartStop(BaseException):
 
 
 class VerifiedDownloadJob(job.DownloadJob):
+    def initialize(self, keywords=None):
+        super().initialize(keywords)
+        # Let gallery-dl replace empty files through its normal temporary-file flow.
+        pathfmt = self.pathfmt
+        check_file = pathfmt.check_file
+        pathfmt.check_file = lambda: file_has_data(Path(pathfmt.realpath)) and check_file()
+
     def handle_url(self, url, keywords):
-        from .library import safe_file
         from .store import Store
 
         target = Path(self.pathfmt.realdirectory) / self.pathfmt.build_filename(keywords)
-        if target.is_file():
+        if file_has_data(target):
             return super().handle_url(url, keywords)
         store = getattr(getattr(self, 'owner', None), 'store', None)
         if store is None:
@@ -100,14 +108,18 @@ class VerifiedDownloadJob(job.DownloadJob):
                 store = self._archive_store = Store(Path(base).parent)
         tweet_id, num = str(keywords.get('tweet_id', '')), str(keywords.get('num', ''))
         if tweet_id.isdigit() and num.isdigit():
-            for row in store.query("SELECT path FROM media WHERE post_id=? AND path LIKE '@legacy/%'", (tweet_id,)):
+            for row in store.query("SELECT path,size FROM media WHERE post_id=? AND path LIKE '@legacy/%'", (tweet_id,)):
                 if not Path(row['path']).name.startswith(tweet_id + '_' + num + '.'):
                     continue
                 if store.legacy is None or not store.legacy.is_dir():
                     raise SmartStop('error')
                 try:
-                    safe_file(store, row['path'])
-                except ValueError:
+                    size = safe_file(store, row['path'], allow_empty=True).stat().st_size
+                except (ValueError, FileNotFoundError):
+                    size = 0
+                if size != row['size']:
+                    store.execute('UPDATE media SET size=? WHERE path=?', (size, row['path']))
+                if not size:
                     continue
                 self.pathfmt.set_filename(keywords)
                 self.pathfmt.fix_extension()
@@ -116,7 +128,7 @@ class VerifiedDownloadJob(job.DownloadJob):
         if self.archive is None:
             return super().handle_url(url, keywords)
         check = self.archive.check
-        self.archive.check = lambda kw: bool(check(kw) and target.is_file())
+        self.archive.check = lambda kw: bool(check(kw) and file_has_data(target))
         try:
             return super().handle_url(url, keywords)
         finally:
@@ -311,10 +323,10 @@ class SmartRunner:
         recent = self.task.get('history_choice') == 'recent300'
         limit = ' LIMIT 300' if recent else ''
         media_only = ' AND has_media=1' if self.task['crawl_mode'] == 'media' else ''
-        return self.store.query('''SELECT * FROM (SELECT * FROM crawl_posts WHERE task_id=?
+        return self.store.query('''SELECT tweet_id,payload FROM (SELECT tweet_id,payload,completed FROM crawl_posts WHERE task_id=?
                                   ''' + media_only + ''' ORDER BY length(tweet_id) DESC,tweet_id DESC''' + limit + ''')
-                                  WHERE completed=0 ORDER BY length(tweet_id) DESC,tweet_id DESC''',
-                                (self.task['id'],))
+                                  WHERE completed=0 ORDER BY length(tweet_id) DESC,tweet_id DESC LIMIT ?''',
+                                (self.task['id'], self.batch_size))
 
     def download(self, extr, tweets):
         extr.tweets = lambda: tweets
@@ -327,13 +339,12 @@ class SmartRunner:
             raise SmartStop('error')
 
     def download_cached(self):
-        rows = self.cached_posts()
-        if rows:
+        selected = self.cached_posts()
+        if selected:
             # Cached raw tweets contain everything needed; replay performs no X listing request.
             extr = self.make_extractor(self.task['crawl_mode'])
             extr.login = lambda: None
             extr.metadata = lambda: {}
-            selected = rows[:self.batch_size]
             try:
                 self.download(extr, (json.loads(row['payload']) for row in selected))
             except SmartStop as stop:
@@ -366,8 +377,8 @@ class SmartRunner:
             pending = {row['tweet_id'] for row in self.cached_posts()}
             if any(row['tweet_id'] in pending for row in selected):
                 raise SmartStop('error')
-        if self.cached_posts():
-            raise SmartStop('batch')
+            if pending:
+                raise SmartStop('batch')
 
     def stream(self, tweets, media_only=False):
         since = self.task.get('since_id') if self.task['task_kind'] == 'incremental' else None

@@ -1,6 +1,7 @@
 import json
 import hashlib
 import re
+import stat
 import time
 from pathlib import Path
 from contextlib import nullcontext
@@ -12,14 +13,22 @@ KINDS = {'.jpg': 'image', '.jpeg': 'image', '.png': 'image', '.webp': 'image',
          '.gif': 'image', '.avif': 'image', '.mp4': 'video', '.webm': 'video', '.mov': 'video'}
 
 
-def safe_file(store, relative):
+def file_has_data(path):
+    try:
+        info = path.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    return stat.S_ISREG(info.st_mode) and info.st_size > 0
+
+
+def safe_file(store, relative, *, allow_empty=False):
     relative = str(relative)
     legacy = relative.startswith('@legacy/')
     root = store.legacy if legacy else store.downloads
     if root is None:
         raise ValueError('旧归档只读卷未挂载')
     path = (root / (relative[8:] if legacy else relative)).resolve()
-    if not path.is_relative_to(root) or not path.is_file():
+    if not path.is_relative_to(root) or not (path.is_file() if allow_empty else file_has_data(path)):
         raise ValueError('归档文件不存在')
     return path
 
@@ -75,11 +84,13 @@ def index_folder(store, user, legacy=False, db=None):
             for media in media_by_post.get(identifier, []):
                 relative = prefix + media.relative_to(root).as_posix()
                 try:
-                    checked = safe_file(store, relative)
+                    size = safe_file(store, relative, allow_empty=True).stat().st_size
                 except ValueError:
                     continue
-                inserted = db.execute('INSERT OR IGNORE INTO media(post_id,path,kind,size) VALUES (?,?,?,?)',
-                                      (identifier, relative, KINDS[media.suffix.lower()], checked.stat().st_size)).rowcount
+                inserted = size > 0 and db.execute('INSERT OR IGNORE INTO media(post_id,path,kind,size) VALUES (?,?,?,?)',
+                                                   (identifier, relative, KINDS[media.suffix.lower()], size)).rowcount
+                if not inserted:
+                    db.execute('UPDATE media SET size=? WHERE path=? AND size<>?', (size, relative, size))
                 new_media += inserted
     return new_posts, new_media
 
@@ -114,7 +125,7 @@ def list_bloggers(store, q='', user='', featured=False, limit=None):
         total = db.execute('SELECT COUNT(*) n FROM bloggers b' + clause, args).fetchone()['n']
         sql = '''SELECT b.*,
                  (SELECT COUNT(*) FROM posts p WHERE p.user=b.user) post_count,
-                 (SELECT COUNT(*) FROM media m JOIN posts p ON p.id=m.post_id WHERE p.user=b.user) media_count,
+                 (SELECT COUNT(*) FROM media m JOIN posts p ON p.id=m.post_id WHERE p.user=b.user AND m.size>0) media_count,
                  (SELECT COUNT(*) FROM posts p WHERE p.user=b.user AND p.favorite=1) favorite_count,
                  (SELECT p.posted_at FROM posts p WHERE p.user=b.user ORDER BY length(p.id) DESC,p.id DESC LIMIT 1) last_post_at,
                  COALESCE(s.enabled,0) subscribed,COALESCE(s.enabled,0) enabled,s.schedule,s.next_run,
@@ -152,10 +163,10 @@ def list_posts(store, q='', user='', post='', favorite=False, tag='', kind='', l
     if favorite:
         where.append('favorite=1')
     if tag:
-        where.append("(',' || tags || ',') LIKE ?")
-        args.append('%,' + tag[:60] + ',%')
+        where.append("instr(',' || lower(tags) || ',', lower(?))>0")
+        args.append(',' + tag + ',')
     if kind in ('image', 'video'):
-        where.append('EXISTS (SELECT 1 FROM media m WHERE m.post_id=posts.id AND kind=?)')
+        where.append('EXISTS (SELECT 1 FROM media m WHERE m.post_id=posts.id AND kind=? AND size>0)')
         args.append(kind)
     snapshot = snapshot if snapshot > 0 else time.time()
     where.append('added<=?')
@@ -173,7 +184,7 @@ def list_posts(store, q='', user='', post='', favorite=False, tag='', kind='', l
                                            args + [max(1, min(limit, 100)), max(0, offset)])]
     if rows:
         placeholders = ','.join('?' for _ in rows)
-        media = store.query(f'SELECT * FROM media WHERE post_id IN ({placeholders}) ORDER BY id', [r['id'] for r in rows])
+        media = store.query(f'SELECT * FROM media WHERE post_id IN ({placeholders}) AND size>0 ORDER BY id', [r['id'] for r in rows])
         grouped = {}
         for item in media:
             item['url'] = '/api/v1/media/' + str(item['id'])

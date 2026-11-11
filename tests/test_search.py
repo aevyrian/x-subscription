@@ -66,6 +66,22 @@ class SearchTests(unittest.TestCase):
         self.assertEqual([b['user'] for b in self.client.get('/api/v1/bloggers', params={'q': 'foo_bar'}).json()['items']], ['foo_bar'])
         self.assertEqual(self.client.get('/api/v1/posts', params={'q': "' OR 1=1 --"}).json()['total'], 0)
 
+    def test_tag_filter_matches_literal_labels_at_full_length(self):
+        self.blogger('example')
+        self.post(101, 'example')
+        self.post(102, 'example')
+        long_label = '长' * 61
+        self.assertEqual(self.client.patch('/api/v1/posts/101', json={
+            'tags': f'a_b,50%,{long_label},普通'
+        }).status_code, 200)
+        self.assertEqual(self.client.patch('/api/v1/posts/102', json={
+            'tags': 'axb,500,普通标签'
+        }).status_code, 200)
+        for tag in ('a_b', 'A_B', '50%', long_label, '普通'):
+            with self.subTest(tag=tag):
+                result = self.client.get('/api/v1/posts', params={'tag': tag}).json()
+                self.assertEqual([post['id'] for post in result['items']], ['101'])
+
     def test_exact_handle_ranks_first_and_explicit_user_is_normalized(self):
         self.blogger('foo', '名称')
         self.blogger('foomore', '名称', featured=1)

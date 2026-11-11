@@ -14,7 +14,7 @@ from tests.test_smart_engine import complete_tweet
 from xarchive.engine import Engine
 from xarchive.gallery_runner import AtomicMetadataPP, SmartRunner, SmartStop
 from xarchive.worker import DownloadError
-from xarchive.library import index_folder
+from xarchive.library import index_folder, list_posts
 from xarchive.store import Store
 
 
@@ -80,9 +80,13 @@ class MissingMediaTests(unittest.TestCase):
             self.assertTrue(path.exists())
             path.unlink()
             engine(task, lambda: False, lambda n: None)
+            (self.root / 'source' / 'sample.jpg').write_bytes(b'longer-fixture-image')
+            path.write_bytes(b'')
+            engine(task, lambda: False, lambda n: None)
         self.assertTrue(path.exists(), 'missing media was not restored')
-        self.assertEqual(path.read_bytes(), b'fixture-image')
-        self.assertEqual(len(self.requests), 2)
+        self.assertEqual(path.read_bytes(), b'longer-fixture-image')
+        self.assertEqual(len(self.requests), 3)
+        self.assertEqual(self.store.query('SELECT size FROM media'), [{'size': len(b'longer-fixture-image')}])
 
     def test_smart_preserves_existing_indexed_legacy_media_without_downloading(self):
         legacy = self.root / 'old'
@@ -135,6 +139,37 @@ class MissingMediaTests(unittest.TestCase):
         self.assertEqual(self.requests, [], 'old archive keys may not match current gallery-dl keys')
         self.assertFalse((self.store.downloads / 'example' / '123_1.jpg').exists())
         self.assertEqual(path.read_bytes(), b'old-media')
+
+    def test_smart_repairs_empty_and_missing_legacy_media_in_new_library(self):
+        legacy = self.root / 'old'
+        folder = legacy / 'example'
+        folder.mkdir(parents=True)
+        (folder / '123.json').write_text(json.dumps({'tweet_id': 123, 'author': {'name': 'example'}}), encoding='utf-8')
+        empty = folder / '123_1.jpg'
+        empty.write_bytes(b'old-media')
+        missing = folder / '123_2.jpg'
+        missing.write_bytes(b'old-media')
+        (folder / '123_3.jpg').touch()
+        self.store.legacy = legacy.resolve()
+        self.assertEqual(index_folder(self.store, 'example', legacy=True), (1, 2))
+        empty.write_bytes(b'')
+        missing.unlink()
+        task, _ = self.store.submit('example')
+        self.store.execute("UPDATE tasks SET status='running',task_kind='history',crawl_mode='media' WHERE id=?", (task['id'],))
+        task = self.store.query('SELECT * FROM tasks WHERE id=?', (task['id'],))[0]
+        runner = SmartRunner(self.store, task, emit=lambda event: None)
+        raw = complete_tweet()
+        raw['legacy']['extended_entities'] = {'media': [{'type': 'photo', 'media_url': self.url}] * 2}
+        runner.save_tweet(raw, True)
+        with patch.dict(config._config, Engine(self.store).config(task), clear=True), patch.dict(postprocessor._cache, {'metadata': AtomicMetadataPP}):
+            runner.download_cached()
+        self.assertEqual(empty.read_bytes(), b'')
+        self.assertFalse(missing.exists())
+        self.assertEqual(len(self.requests), 2)
+        self.assertEqual(index_folder(self.store, 'example'), (0, 2))
+        media = list_posts(self.store)['items'][0]['media']
+        self.assertEqual({item['path'] for item in media}, {'example/123_1.jpg', 'example/123_2.jpg'})
+        self.assertEqual(self.store.query("SELECT size FROM media WHERE path LIKE '@legacy/%'"), [{'size': 0}] * 2)
 
     def test_single_post_preserves_legacy_media_without_matching_archive_key(self):
         legacy = self.root / 'old'

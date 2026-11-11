@@ -95,9 +95,23 @@ class SmartEngineTests(unittest.TestCase):
             runner.save_tweet(tweet(identifier, 4), True)
         self.store.execute("UPDATE tasks SET history_choice='recent300' WHERE id=?", (self.task['id'],))
         runner.task['history_choice'] = 'recent300'
-        selected = runner.cached_posts()
-        self.assertEqual(len(selected), 300)
-        self.assertEqual((selected[0]['tweet_id'], selected[-1]['tweet_id']), ('1001', '702'))
+        batches = []
+
+        def download(_, tweets):
+            ids = [tweet['rest_id'] for tweet in tweets]
+            batches.append(ids)
+            for identifier in ids:
+                runner.complete(identifier)
+
+        with patch.object(runner, 'make_extractor'), patch.object(runner, 'download', side_effect=download):
+            with self.assertRaises(SmartStop) as caught:
+                runner.download_cached()
+            self.assertEqual(caught.exception.outcome, 'batch')
+            runner.download_cached()
+
+        self.assertEqual(batches, [[str(i) for i in range(1001, 801, -1)],
+                                   [str(i) for i in range(801, 701, -1)]])
+        self.assertEqual(self.store.query('SELECT progress FROM tasks'), [{'progress': 300}])
 
     def test_limit_stops_even_before600_and_preserves_scope(self):
         for count in (1, 599, 600, 601):
