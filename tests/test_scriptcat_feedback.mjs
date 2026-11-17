@@ -76,7 +76,7 @@ assert.equal(JSON.parse(app.requests[4].data).url,'https://x.com/third/status/78
 assert.equal(JSON.parse(app.requests[4].data).schedule,'once');
 app.reply(4,{task:{...task,user:'third',post_id:'789'}});await third;
 app.node('archive').onclick();
-assert.equal(app.opened[0][0],'https://archive.test/?post=789');
+assert.equal(app.opened[0][0],'https://archive.test/?user=third','A selected post may not be archived yet');
 app.navigate('/home');app.hover('https://x.com/hovered/status/987');
 assert.match(app.node('subject').textContent,/@hovered/);
 const hovered=app.node('post').onclick();

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         拾存 · X 下载与归档
 // @namespace    xarchive.personal
-// @version      1.4.9
+// @version      1.4.10
 // @description  下载帖子、查看博主订阅与更新时间、立即更新，并打开自己的归档。
 // @match        https://x.com/*
 // @match        https://www.x.com/*
@@ -291,7 +291,7 @@
   $('update').onclick=()=>submit('update');
   $('refresh-subscription').onclick=()=>refreshBlogger(true);
   $('schedule').onchange=update;
-  $('archive').onclick=()=>{if(!configured())return;update();const item=selected();if(item)GM_openInTab(base+'/?'+(item.post?'post='+encodeURIComponent(item.post):'user='+encodeURIComponent(item.user)),{active:true});};
+  $('archive').onclick=()=>{if(!configured())return;update();const item=selected();if(item)GM_openInTab(base+'/?user='+encodeURIComponent(item.user),{active:true});};
   update(); const observer=setInterval(update,1000);
   verifyConnection();
   window.addEventListener('resize',update);
