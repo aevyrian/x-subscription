@@ -1,0 +1,42 @@
+name: Publish xarchive v1.0.14 once
+
+on:
+  push:
+    branches:
+      - codex/release-v1.0.14-recovery-ui
+    paths:
+      - .github/workflows/publish-v1.0.14.yml
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  tag-and-dispatch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+      - name: Validate exact release source and create tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = 'refs/heads/codex/release-v1.0.14-recovery-ui'
+          git merge-base --is-ancestor 388c3a5196ef4266c3fb7639828f6a381a6601b0 HEAD
+          git merge-base --is-ancestor e80520d4267e133aff31117c8ff6593f52964215 HEAD
+          grep -q '## v1.0.14 ' CHANGELOG.md
+          grep -q 'ghcr.io/aevyrian/x-subscription:1.0.14' compose.yaml
+          grep -q 'ghcr.io/aevyrian/x-subscription:1.0.14' compose.nas.yaml
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v1.0.14" >/dev/null 2>&1; then
+            echo 'v1.0.14 tag already exists; refuse to replace it'
+            exit 1
+          fi
+          gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref='refs/tags/v1.0.14' -f sha="$GITHUB_SHA" >/dev/null
+          gh api -X POST "repos/$GITHUB_REPOSITORY/actions/workflows/release.yml/dispatches" \
+            -f ref='v1.0.14'
+          echo 'Triggered release workflow for v1.0.14'
