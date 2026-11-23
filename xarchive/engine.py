@@ -99,6 +99,7 @@ class Engine:
         count, scanned = [task.get('progress', 0) if smart else 0], [task.get('scanned_posts', 0) if smart else 0]
         outcome, saved_ids, scanned_ids = {}, set(), set()
         timed_out = False
+        folder = self.store.downloads / task['user']
 
         def index_saved():
             with self.store.connect() as db:
@@ -162,7 +163,8 @@ class Engine:
             reader.start()
             minutes = self.store.setting('timeout_minutes', 0)
             deadline = time.monotonic() + minutes * 60 if minutes else None
-            last_index = time.monotonic()
+            last_index_check = time.monotonic()
+            indexed_state = None
             reported = -1
             while process.poll() is None:
                 if interrupted():
@@ -176,9 +178,18 @@ class Engine:
                         self.store.execute('UPDATE tasks SET scanned_posts=? WHERE id=? AND generation=?',
                                            (scanned[0], task['id'], task['generation']))
                     reported = (count[0], scanned[0])
-                if time.monotonic() - last_index >= 5:
-                    index_saved()
-                    last_index = time.monotonic()
+                if time.monotonic() - last_index_check >= 5:
+                    try:
+                        info = folder.stat()
+                        folder_state = (info.st_dev, info.st_ino, info.st_mtime_ns)
+                    except (FileNotFoundError, NotADirectoryError):
+                        folder_state = None
+                    state = (folder_state, count[0])
+                    if state != indexed_state:
+                        # Keep the pre-scan state so writes during indexing are seen on the next check.
+                        index_saved()
+                        indexed_state = state
+                    last_index_check = time.monotonic()
                 time.sleep(0.25)
             if timed_out:
                 raise DownloadError('任务超过设置的运行时限，稍后重试；已保存内容会保留')
@@ -218,6 +229,7 @@ class Engine:
             Path(filename).unlink(missing_ok=True)
             index_failed = False
             try:
+                # Also reconcile partial saves and in-place changes that do not touch the directory.
                 index_saved()
             except Exception:
                 if outcome.get('type') != 'rate_limit':
