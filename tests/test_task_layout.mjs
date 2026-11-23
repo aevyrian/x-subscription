@@ -30,7 +30,7 @@ function harness(saved, denied=false) {
   context.fixture=fixture;context.calls=calls;
   vm.runInContext(`state={view:'tasks',offset:0};taskItems=fixture;
     api=async(path,method='GET',body)=>{calls.push({path,method,body});
-      if(path==='/stats')return {posts:0,media:0,bloggers:0,active_tasks:1};
+      if(path==='/stats')return {posts:0,media:0,bloggers:0,active_tasks:1,featured_bloggers:[]};
       if(path==='/bloggers')return {items:[]};
       if(path.startsWith('/tasks?')){
         const params=new URLSearchParams(path.split('?')[1]),query=(params.get('q')||'').toLowerCase();
@@ -82,6 +82,7 @@ const blocked=harness('b',true);blocked.run('renderTaskContent()');
 assert.match(blocked.node('content').innerHTML,/class="task-card/);
 const markup=fs.readFileSync(new URL('../xarchive/static/index.html',import.meta.url),'utf8');
 assert.doesNotMatch(markup,/data-action="task-layout"/,'The layout selector is no longer part of the page');
+assert.doesNotMatch(markup,/id="task-summary"/,'Task counts belong in their filter buttons');
 
 const app=harness();
 await app.run(`action({dataset:{action:'task-filter',filter:'attention'}})`);
@@ -125,7 +126,7 @@ for(const operation of ['delete','retry','cancel']){
     api=async(path,method='GET',body)=>{calls.push({path,method,body});
       if(path==='/tasks/bulk')return {affected:120,skipped:3,matched:123};
       if(path.startsWith('/tasks?'))return {items:[fixture[1]],total:123,counts:{all:123,active:3,attention:123,done:0}};
-      if(path==='/stats')return {posts:0,media:0,bloggers:0,active_tasks:0};
+      if(path==='/stats')return {posts:0,media:0,bloggers:0,active_tasks:0,featured_bloggers:[]};
       if(path==='/bloggers')return {items:[]};return {};};
     confirm=()=>{throw Error('Bulk actions must not ask for confirmation');};`);
   await bulk.run(`action({dataset:{action:'task-bulk',operation}})`);
@@ -350,13 +351,27 @@ assert.doesNotMatch(onceSummary,/未设计划/,'A once plan is present even thou
 const draftSearch=harness();await draftSearch.run('route()');draftSearch.node('search').value='@draft';
 await draftSearch.intervals[0]();
 assert.equal(draftSearch.node('search').value,'@draft','Background task refresh must not erase an unsubmitted global search');
+
+const overview=harness();
+overview.run(`state={view:'archive',order:'timeline'};
+  const stubApi=api;api=(path)=>path==='/stats'
+    ?stubApi(path).then(data=>({...data,featured_bloggers:[{user:'nasa',display_name:'NASA'}]}))
+    :stubApi(path);`);
+await overview.intervals[0]();
+assert.deepEqual(overview.calls.map(call=>call.path),['/stats'],'Periodic overview must not request full blogger summaries');
+assert.match(overview.node('side-bloggers').innerHTML,/NASA/);
+assert.equal(overview.node('queue-badge').textContent,1);
+
 const history=harness();
 history.run(`pendingTask={...fixture[1],id:'history-id',status:'awaiting_confirmation',task_kind:'history',total_posts:null,media_posts:1001,media_complete:false};taskItems=[pendingTask];taskFilter='all';taskQuery='';`);
 const historyCard=history.run('taskCard(pendingTask)');
 assert.match(historyCard,/待确认/);
 assert.match(historyCard,/总帖数未知/);
 assert.match(historyCard,/至少 1001 条含媒体帖子/);
-for(const choice of ['all','recent300','skip'])assert.match(historyCard,new RegExp('data-choice="'+choice+'"'));
+assert.match(historyCard,/选择范围/);
+assert.doesNotMatch(historyCard,/data-choice=/,'History choices belong in the task dialog');
+const historyDetails=history.run('taskDetails(pendingTask)');
+for(const choice of ['all','recent300','skip'])assert.match(historyDetails,new RegExp('data-choice="'+choice+'"'));
 assert.doesNotMatch(history.run('taskActions(pendingTask)'),/data-action="delete"/,'Pending history must be cancelled before deleting');
 history.run(`pendingTask.media_complete=true;pendingTask.total_posts=2048;`);
 assert.match(history.run('taskCard(pendingTask)'),/X 显示 2048 条帖子/);

@@ -1,6 +1,7 @@
 import functools
 import io
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -16,6 +17,7 @@ from gallery_dl import exception
 from gallery_dl.extractor.twitter import TwitterAPI
 
 from xarchive.engine import Engine
+from xarchive.library import index_folder
 from xarchive.store import Store
 from xarchive.worker import DownloadError
 
@@ -99,6 +101,44 @@ class EngineReliabilityTests(unittest.TestCase):
                 self.engine(self.job, lambda: False, lambda n: None)
         row = self.store.query('SELECT new_posts,new_media FROM tasks')[0]
         self.assertEqual(row, {'new_posts': 1, 'new_media': 1})
+
+    def test_periodic_index_skips_idle_directory_and_finds_new_files_during_download(self):
+        folder = self.store.downloads / 'example'
+        folder.mkdir()
+        meta = folder / '123.json'
+        image = folder / '123_1.jpg'
+        now = 0
+        scan_times = []
+
+        def sleep(seconds):
+            nonlocal now
+            now += seconds
+            if now == 12:
+                stamp = folder.stat()
+                meta.write_text(json.dumps({'tweet_id': 123, 'author': {'name': 'example'}}), encoding='utf-8')
+                image.write_bytes(b'first')
+                os.utime(folder, ns=(stamp.st_atime_ns, stamp.st_mtime_ns + 2_000_000_000))
+            if now == 20:
+                self.assertEqual(self.store.query('SELECT id FROM posts'), [{'id': '123'}])
+                self.assertEqual(self.store.query('SELECT size FROM media'), [{'size': 5}])
+            if now == 22:
+                # An in-place repair can leave the parent directory timestamp unchanged.
+                image.write_bytes(b'repaired')
+
+        def scan(*args, **kwargs):
+            scan_times.append(now)
+            return index_folder(*args, **kwargs)
+
+        process = self.completed_process('XARCHIVE_POST 123\n')
+        process.poll = lambda: None if now < 26 else process.returncode
+        clock = SimpleNamespace(monotonic=lambda: now, sleep=sleep)
+        with patch('xarchive.engine.subprocess.Popen', return_value=process), \
+                patch('xarchive.engine.time', clock), patch('xarchive.engine.index_folder', side_effect=scan):
+            self.engine(self.job, lambda: False, lambda n: None)
+
+        self.assertEqual(scan_times, [5, 15, 26])
+        self.assertEqual(self.store.query('SELECT size FROM media'), [{'size': 8}])
+        self.assertEqual(self.store.query('SELECT new_posts,new_media FROM tasks'), [{'new_posts': 1, 'new_media': 1}])
 
     def test_subprocess_metadata_write_failure_keeps_previous_json(self):
         source = Path(self.tmp.name) / 'source'

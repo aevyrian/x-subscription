@@ -264,9 +264,18 @@ def create_app(data_dir=None, run_worker=True, runner=None):
 
     @app.get('/api/v1/stats')
     def stats(_=Depends(admin)):
-        return {**{t: store.query(f'SELECT COUNT(*) n FROM {t}')[0]['n'] for t in ('posts', 'media', 'bloggers', 'subscriptions')},
-                'active_tasks': store.query("SELECT COUNT(*) n FROM tasks WHERE status IN ('queued','running','retry')")[0]['n'],
-                'confirmation_tasks': store.query("SELECT COUNT(*) n FROM tasks WHERE status='awaiting_confirmation'")[0]['n']}
+        with store.connect() as db:
+            counts = db.execute('''SELECT
+                (SELECT COUNT(*) FROM posts) posts,
+                (SELECT COUNT(*) FROM media) media,
+                (SELECT COUNT(*) FROM bloggers) bloggers,
+                (SELECT COUNT(*) FROM subscriptions) subscriptions,
+                (SELECT COUNT(*) FROM tasks WHERE status IN ('queued','running','retry')) active_tasks,
+                (SELECT COUNT(*) FROM tasks WHERE status='awaiting_confirmation') confirmation_tasks
+            ''').fetchone()
+            featured = db.execute('''SELECT user,display_name FROM bloggers WHERE featured=1
+                                     ORDER BY created DESC,user LIMIT 6''')
+            return {**dict(counts), 'featured_bloggers': [dict(row) for row in featured]}
 
     @app.post('/api/v1/tasks')
     def submit(body: Intake, who=Depends(identity)):
