@@ -4,7 +4,7 @@
 
 拾存是一个自托管的 X / Twitter 归档工具：从 X 页面或网站添加帖子与博主，由 gallery-dl 保存文字、图片和视频，再在私人网站里浏览、播放、收藏和整理。后端、网站和 ScriptCat 脚本共用同一套数据；一个 Docker 镜像即可运行。
 
-[正式版 v1.0.12](https://github.com/aevyrian/x-subscription/releases/tag/v1.0.12) · [更新说明](CHANGELOG.md) · [NAS 部署模板](compose.nas.yaml)
+[正式版 v1.0.13](https://github.com/aevyrian/x-subscription/releases/tag/v1.0.13) · [更新说明](CHANGELOG.md) · [NAS 部署模板](compose.nas.yaml)
 
 ## 能做什么
 
@@ -37,7 +37,7 @@ gallery-dl 负责解析与下载；拾存负责队列、计划、归档索引和
 
 需要已有 Docker Engine 与 Compose。正式版提供 `linux/amd64` 和 `linux/arm64` 镜像，无需本机安装 Python 或编译源码。
 
-1. 在 [正式版附件](https://github.com/aevyrian/x-subscription/releases/tag/v1.0.12) 下载 `xarchive-docker-v1.0.12.zip` 并解压。
+1. 在 [正式版附件](https://github.com/aevyrian/x-subscription/releases/tag/v1.0.13) 下载 `xarchive-docker-v1.0.13.zip` 并解压。
 2. 在解压目录执行：
 
 ```sh
@@ -45,9 +45,9 @@ docker compose pull
 docker compose up -d
 ```
 
-默认镜像为 `ghcr.io/aevyrian/x-subscription:1.0.12`。仓库和镜像当前保持私有，需要有权访问的 GitHub 账号；使用具有 `read:packages` 权限的个人访问令牌，通过 `docker login ghcr.io -u 你的GitHub用户名` 的交互密码提示登录，不把令牌写入 Compose。镜像若由管理员改为公开后可匿名拉取。认证说明见 [GitHub 官方文档](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)。
+默认镜像为 `ghcr.io/aevyrian/x-subscription:1.0.13`。仓库和镜像当前保持私有，需要有权访问的 GitHub 账号；使用具有 `read:packages` 权限的个人访问令牌，通过 `docker login ghcr.io -u 你的GitHub用户名` 的交互密码提示登录，不把令牌写入 Compose。镜像若由管理员改为公开后可匿名拉取。认证说明见 [GitHub 官方文档](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)。
 
-版本号固定便于回退；要使用另一版本，在私有 `.env` 中设置 `XARCHIVE_IMAGE=ghcr.io/aevyrian/x-subscription:目标版本`。Release 的 `IMAGE.txt` 给出不可变镜像摘要，`SHA256SUMS.txt` 可校验下载附件。[Docker Hub](https://hub.docker.com/r/aevyrian/x-subscription) 私有镜像 `aevyrian/x-subscription:1.0.12` 由发布后的镜像同步流程提供；同步成功后两架构与 GHCR 摘要一致。使用 Docker Hub 时先执行 `docker login`，再在 Compose 同目录的私有 `.env` 中设置 `XARCHIVE_IMAGE=aevyrian/x-subscription:1.0.12`，然后执行原来的 `docker compose pull` 和 `docker compose up -d`。
+版本号固定便于回退；要使用另一版本，在私有 `.env` 中设置 `XARCHIVE_IMAGE=ghcr.io/aevyrian/x-subscription:目标版本`。Release 的 `IMAGE.txt` 给出不可变镜像摘要，`SHA256SUMS.txt` 可校验下载附件。[Docker Hub](https://hub.docker.com/r/aevyrian/x-subscription) 私有镜像 `aevyrian/x-subscription:1.0.13` 由发布后的镜像同步流程提供；同步成功后两架构与 GHCR 摘要一致。使用 Docker Hub 时先执行 `docker login`，再在 Compose 同目录的私有 `.env` 中设置 `XARCHIVE_IMAGE=aevyrian/x-subscription:1.0.13`，然后执行原来的 `docker compose pull` 和 `docker compose up -d`。
 
 需要从源码构建时，下载源码包，在源码目录执行 `docker compose -f compose.yaml -f compose.build.yaml up -d --build`；它使用本地 `xarchive:local` 镜像。
 

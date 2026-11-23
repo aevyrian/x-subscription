@@ -1,7 +1,7 @@
 name: xarchive
 services:
   archive:
-    image: ${XARCHIVE_IMAGE:-ghcr.io/aevyrian/x-subscription:1.0.12}
+    image: ${XARCHIVE_IMAGE:-ghcr.io/aevyrian/x-subscription:1.0.13}
     init: true
     ports:
       - "127.0.0.1:8787:8787"
