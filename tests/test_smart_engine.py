@@ -137,6 +137,73 @@ class SmartEngineTests(unittest.TestCase):
         self.assertEqual(self.store.query('SELECT progress FROM tasks')[0]['progress'], 1)
         self.assertEqual(json.loads((self.store.downloads / 'example' / '123.json').read_text(encoding='utf-8'))['content'], 'cached body')
 
+    def test_recovered_finished_listing_indexes_saved_post_without_reopening_x(self):
+        for kind, next_cursor in (('history', None), ('incremental', None), ('incremental', 'older-page')):
+            with self.subTest(kind=kind, next_cursor=next_cursor), tempfile.TemporaryDirectory() as root:
+                store = Store(root)
+                store.set_setting('x_cookies', {'auth_token': 'test-only'})
+                task, _ = store.subscribe('example', 'weekly')
+                if kind == 'incremental':
+                    task, _ = store.submit('example', source='update')
+                claimed = store.claim()
+                self.assertEqual((claimed['id'], claimed['task_kind']), (task['id'], kind))
+                engine = Engine(store)
+                first = SmartRunner(store, claimed, emit=lambda event: None)
+                first.update(crawl_mode='full')
+                post_id = str(int(claimed['since_id'] or 0) + 901)
+                settings = engine.config(claimed)
+                fresh = first.make_extractor
+
+                def offline_listing(*args):
+                    extr = fresh(*args)
+                    extr.login = lambda: None
+                    extr.metadata = lambda: {}
+                    def listing():
+                        yield complete_tweet(int(post_id))
+                        if next_cursor:
+                            yield complete_tweet(int(claimed['since_id']))
+                        extr._update_cursor(next_cursor)
+                    extr.tweets = listing
+                    return extr
+
+                with patch.dict(config._config, settings, clear=True), \
+                        patch.dict(postprocessor._cache, {'metadata': AtomicMetadataPP}), \
+                        patch.object(first, 'make_extractor', side_effect=offline_listing):
+                    self.assertEqual(first.run(), 0)
+                self.assertEqual(first.task['probe_complete'], 1)
+                self.assertIsNone(first.task['cursor'])
+                folder = store.downloads / 'example'
+                self.assertTrue((folder / (post_id + '.json')).is_file())
+                (folder / (post_id + '_1.jpg')).write_bytes(b'fixture-media')
+                self.assertFalse(store.query('SELECT id FROM posts'))
+
+                # Restart between saving the files and having the parent process index them.
+                store.recover()
+                duplicate, unchanged = store.submit('example', source='update' if kind == 'incremental' else 'website')
+                self.assertTrue(unchanged)
+                self.assertEqual(duplicate['id'], claimed['id'])
+
+                def run_child(*args, **kwargs):
+                    events = []
+                    current = store.query('SELECT * FROM tasks WHERE id=?', (claimed['id'],))[0]
+                    result = SmartRunner(store, current, emit=events.append).run()
+                    stdout = io.StringIO(''.join('XARCHIVE_EVENT ' + json.dumps(event) + '\n' for event in events))
+                    return SimpleNamespace(returncode=result, stdout=stdout, poll=lambda: result)
+
+                with patch('xarchive.engine.subprocess.Popen', side_effect=run_child), \
+                        patch.object(SmartRunner, 'make_extractor', side_effect=AssertionError('reopened X timeline')) as listing:
+                    self.assertTrue(Worker(store, engine).run_one())
+                    self.assertEqual(store.query('SELECT status,new_posts,new_media FROM tasks WHERE id=?', (claimed['id'],)),
+                                     [{'status': 'succeeded', 'new_posts': 1, 'new_media': 1}])
+                    listing.assert_not_called()
+                self.assertEqual(store.query('SELECT id FROM posts'), [{'id': post_id}])
+                self.assertEqual(store.query('SELECT post_id,size FROM media'),
+                                 [{'post_id': post_id, 'size': len(b'fixture-media')}])
+                blogger = store.query('SELECT last_success_at,high_water_id FROM bloggers')[0]
+                self.assertIsNotNone(blogger['last_success_at'])
+                if kind == 'incremental':
+                    self.assertEqual(blogger['high_water_id'], post_id)
+
     def test_full_tweet_media_parse_failure_cannot_mark_text_only_complete(self):
         self.store.set_setting('x_cookies', {'auth_token': 'test-only'})
         runner = self.runner()

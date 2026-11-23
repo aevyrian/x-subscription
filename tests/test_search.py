@@ -37,6 +37,19 @@ class SearchTests(unittest.TestCase):
                               VALUES (?,?,?,?,?,?,?,0)''',
                            (str(identifier), user, name, content, favorite, date, 'https://x.com/' + user + '/status/' + str(identifier)))
 
+    def test_overview_returns_only_the_first_six_featured_blogger_identities(self):
+        with self.store.connect() as db:
+            db.executemany('INSERT INTO bloggers(user,display_name,created,featured) VALUES (?,?,?,?)',
+                           [(f'person{i}', f'博主 {i}', i // 2, 1) for i in range(8)]
+                           + [('unfeatured', '未星标', 100, 0)])
+        data = self.client.get('/api/v1/stats').json()
+        self.assertEqual(data['bloggers'], 9)
+        self.assertEqual(data['featured_bloggers'],
+                         [{'user': f'person{i}', 'display_name': f'博主 {i}'} for i in (6, 7, 4, 5, 2, 3)])
+        bloggers = self.client.get('/api/v1/bloggers').json()
+        self.assertEqual(bloggers['total'], 9)
+        self.assertIn('post_count', bloggers['items'][0])
+
     def test_at_handle_current_and_historical_names_find_whole_blogger_archive(self):
         self.blogger('example', '现在的名字')
         self.blogger('other', '另一个人')
