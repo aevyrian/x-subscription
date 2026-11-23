@@ -290,8 +290,10 @@ class SmartRunner:
                 self.ensure_media_saved()
             if self.failed:
                 raise SmartStop('error')
-            self.update(**({'cursor': value} if value is not None else
-                           {'cursor': None, 'probe_complete': 1, 'media_complete': 1}))
+            if self.boundary or value is None:
+                self.update(cursor=None, probe_complete=1, media_complete=1)
+            else:
+                self.update(cursor=value)
             if self.boundary:
                 raise SmartStop('completed')
             if value is not None and self.processed >= self.batch_size:
@@ -421,6 +423,9 @@ class SmartRunner:
                 return
         else:
             self.download_cached()
+            if self.task['probe_complete']:
+                # A recovered task may only need the parent process to index files already saved.
+                return
         self.processed = 0
         mode = 'media' if kind == 'history' and mode == 'media' else 'full'
         extr = self.make_extractor(mode, self.task.get('cursor'))
